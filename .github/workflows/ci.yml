@@ -25,6 +25,10 @@ jobs:
       - name: Verify application
         working-directory: demo-app
         run: python -c "from app import app; print(app.title)"
+      
       - name: Run automated tests
         working-directory: demo-app
         run: python -m pytest -v
+
+      - name: Build Docker image
+        run: docker build -t pipelineguard-demo ./demo-app
