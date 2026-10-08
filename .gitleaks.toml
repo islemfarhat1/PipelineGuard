@@ -1,0 +1,10 @@
+title = "PipelineGuard Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "pipelineguard-test-secret"
+description = "Detect PipelineGuard simulated secrets"
+regex = '''PIPELINEGUARD_TEST_SECRET=DEMO-[0-9]{8}'''
+keywords = ["PIPELINEGUARD_TEST_SECRET"]
