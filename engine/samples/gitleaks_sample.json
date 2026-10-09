@@ -1,0 +1,9 @@
+
+[
+  {
+    "RuleID": "pipelineguard-test-secret",
+    "Description": "Simulated exposed secret",
+    "File": "config.py",
+    "StartLine": 8
+  }
+]

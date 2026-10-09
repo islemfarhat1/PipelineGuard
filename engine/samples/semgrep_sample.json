@@ -1,0 +1,16 @@
+
+{
+  "results": [
+    {
+      "check_id": "pipelineguard-dangerous-eval",
+      "path": "demo-app/app.py",
+      "start": {
+        "line": 12
+      },
+      "extra": {
+        "severity": "ERROR",
+        "message": "Potentially dangerous use of eval()"
+      }
+    }
+  ]
+}

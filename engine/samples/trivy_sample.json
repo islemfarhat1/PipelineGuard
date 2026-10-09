@@ -1,0 +1,24 @@
+
+{
+  "Results": [
+    {
+      "Target": "Debian 13",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-TEST-0001",
+          "PkgName": "example-package",
+          "Severity": "HIGH",
+          "Title": "Example high vulnerability",
+          "Description": "Simulated vulnerability for testing."
+        },
+        {
+          "VulnerabilityID": "CVE-TEST-0002",
+          "PkgName": "another-package",
+          "Severity": "CRITICAL",
+          "Title": "Example critical vulnerability",
+          "Description": "Simulated critical vulnerability for testing."
+        }
+      ]
+    }
+  ]
+}
