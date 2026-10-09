@@ -1,3 +1,4 @@
+
 name: PipelineGuard CI
 
 on:
@@ -7,7 +8,7 @@ on:
   pull_request:
     branches:
       - main
-      
+
 permissions:
   contents: read
 
@@ -25,16 +26,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: pip install -r demo-app/requirements-dev.txt
 
       - name: Verify application
         working-directory: demo-app
         run: python -c "from app import app; print(app.title)"
-      
+
       - name: Run automated tests
         working-directory: demo-app
         run: python -m pytest -v
+      - name: Run PipelineGuard Engine tests
+        run: python -m pytest engine/tests/ -v
 
       - name: Build Docker image
         run: docker build -t pipelineguard-demo ./demo-app
@@ -43,20 +47,70 @@ jobs:
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: 'pipelineguard-demo'
-          format: 'table'
+          format: 'json'
+          output: 'trivy-report.json'
           severity: 'HIGH,CRITICAL'
           exit-code: '0'
+      - name: Verify Trivy report
+        run: |
+          if [ ! -s trivy-report.json ]; then
+            echo "Trivy report is missing or empty."
+            exit 1
+          fi
+
+          python -m json.tool trivy-report.json > /dev/null
+
 
       - name: Scan repository for secrets
+        id: gitleaks_scan
         env:
           GITLEAKS_VERSION: "8.24.2"
         run: |
           curl -fsSL -o gitleaks.tar.gz \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+
           tar -xzf gitleaks.tar.gz gitleaks
-          ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 .
+
+          set +e
+          ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 --report-format json --report-path gitleaks-report.json .
+          GITLEAKS_EXIT_CODE=$?
+          set -e
+
+          echo "Gitleaks exit code: $GITLEAKS_EXIT_CODE"
+          echo "exit_code=$GITLEAKS_EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+          if [ "$GITLEAKS_EXIT_CODE" -ne 0 ] && [ "$GITLEAKS_EXIT_CODE" -ne 1 ]; then
+            echo "Gitleaks encountered an execution error."
+            exit "$GITLEAKS_EXIT_CODE"
+          fi
+
+          if [ ! -f gitleaks-report.json ]; then
+            echo "Gitleaks report is missing."
+            exit 1
+          fi
+
 
       - name: Semgrep SAST scan
         run: |
           python -m pip install semgrep==1.180.0
-          semgrep scan --error --config semgrep-rules/python-security.yml demo-app
+
+          semgrep scan \
+            --config semgrep-rules/python-security.yml \
+            --json \
+            --output semgrep-report.json \
+            demo-app
+
+          if [ ! -s semgrep-report.json ]; then
+            echo "Semgrep report is missing or empty."
+            exit 1
+          fi
+
+      - name: PipelineGuard Security Gate
+        env:
+          GITLEAKS_EXIT_CODE: ${{ steps.gitleaks_scan.outputs.exit_code }}
+        run: |
+          python -m engine.cli \
+            --trivy trivy-report.json \
+            --semgrep semgrep-report.json \
+            --gitleaks gitleaks-report.json \
+            --gitleaks-exit-code "$GITLEAKS_EXIT_CODE"
