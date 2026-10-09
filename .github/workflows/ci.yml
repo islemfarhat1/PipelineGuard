@@ -39,6 +39,13 @@ jobs:
       - name: Build Docker image
         run: docker build -t pipelineguard-demo ./demo-app
 
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: 'pipelineguard-demo'
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
 
       - name: Scan repository for secrets
         env:
