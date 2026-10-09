@@ -1,0 +1,11 @@
+rules:
+  - id: pipelineguard-dangerous-eval
+    languages:
+      - python
+    severity: ERROR
+    message: "Potentially dangerous use of eval(). Avoid evaluating untrusted expressions."
+    pattern: eval(...)
+    metadata:
+      category: security
+      cwe:
+        - "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
