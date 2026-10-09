@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,3 +38,13 @@ jobs:
 
       - name: Build Docker image
         run: docker build -t pipelineguard-demo ./demo-app
+
+
+      - name: Scan repository for secrets
+        env:
+          GITLEAKS_VERSION: "8.24.2"
+        run: |
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 .
