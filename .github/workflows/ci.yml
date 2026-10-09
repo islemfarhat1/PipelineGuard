@@ -40,7 +40,7 @@ jobs:
         run: docker build -t pipelineguard-demo ./demo-app
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref: 'pipelineguard-demo'
           format: 'table'
