@@ -8,8 +8,6 @@ from engine.models import (
     ScanResult,
     ScanStatus,
 )
-from engine.models import Scanner, SecurityFinding, Severity
-
 
 class Decision(str, Enum):
     PASS = "PASS"
