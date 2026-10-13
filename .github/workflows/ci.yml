@@ -129,6 +129,36 @@ jobs:
           fi
 
           python -m json.tool gitleaks-pr-report.json > /dev/null
+      - name: Scan main baseline with Gitleaks
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set +e
+          ./gitleaks git \
+            --config .gitleaks.toml \
+            --log-opts="$BASE_SHA" \
+            --redact \
+            --exit-code 1 \
+            --report-format json \
+            --report-path gitleaks-baseline-report.json
+
+          GITLEAKS_BASE_EXIT_CODE=$?
+          set -e
+
+          echo "Baseline Gitleaks exit code: $GITLEAKS_BASE_EXIT_CODE"
+
+          if [ "$GITLEAKS_BASE_EXIT_CODE" -ne 0 ] && [ "$GITLEAKS_BASE_EXIT_CODE" -ne 1 ]; then
+            echo "Baseline Gitleaks scan failed."
+            exit 1
+          fi
+
+          if [ ! -s gitleaks-baseline-report.json ]; then
+            echo "Baseline Gitleaks report is missing or empty."
+            exit 1
+          fi
+
+          python -m json.tool gitleaks-baseline-report.json > /dev/null
 
       - name: Semgrep SAST scan
         run: |
