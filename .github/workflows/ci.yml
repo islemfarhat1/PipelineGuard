@@ -81,8 +81,6 @@ jobs:
 
           tar -xzf gitleaks.tar.gz gitleaks
 
-          ./gitleaks git --help
-
           set +e
           ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 --report-format json --report-path gitleaks-report.json
           GITLEAKS_EXIT_CODE=$?
@@ -100,7 +98,37 @@ jobs:
             echo "Gitleaks report is missing."
             exit 1
           fi
+      - name: Scan PR commits with Gitleaks
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          ./gitleaks git \
+            --config .gitleaks.toml \
+            --log-opts="${BASE_SHA}..${HEAD_SHA}" \
+            --redact \
+            --exit-code 1 \
+            --report-format json \
+            --report-path gitleaks-pr-report.json
 
+          GITLEAKS_PR_EXIT_CODE=$?
+          set -e
+
+          echo "PR Gitleaks exit code: $GITLEAKS_PR_EXIT_CODE"
+
+          if [ "$GITLEAKS_PR_EXIT_CODE" -ne 0 ] && [ "$GITLEAKS_PR_EXIT_CODE" -ne 1 ]; then
+            echo "PR Gitleaks scan failed."
+            exit 1
+          fi
+
+          if [ ! -s gitleaks-pr-report.json ]; then
+            echo "PR Gitleaks report is missing or empty."
+            exit 1
+          fi
+
+          python -m json.tool gitleaks-pr-report.json > /dev/null
 
       - name: Semgrep SAST scan
         run: |
