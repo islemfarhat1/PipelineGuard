@@ -81,6 +81,8 @@ jobs:
 
           tar -xzf gitleaks.tar.gz gitleaks
 
+          ./gitleaks git --help
+
           set +e
           ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 --report-format json --report-path gitleaks-report.json
           GITLEAKS_EXIT_CODE=$?
