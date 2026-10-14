@@ -160,6 +160,36 @@ jobs:
 
           python -m json.tool gitleaks-baseline-report.json > /dev/null
 
+      - name: Scan PR head history with Gitleaks
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          ./gitleaks git \
+            --config .gitleaks.toml \
+            --log-opts="$HEAD_SHA" \
+            --redact \
+            --exit-code 1 \
+            --report-format json \
+            --report-path gitleaks-current-report.json
+
+          GITLEAKS_CURRENT_EXIT_CODE=$?
+          set -e
+
+          echo "Current Gitleaks exit code: $GITLEAKS_CURRENT_EXIT_CODE"
+
+          if [ "$GITLEAKS_CURRENT_EXIT_CODE" -ne 0 ] && [ "$GITLEAKS_CURRENT_EXIT_CODE" -ne 1 ]; then
+            echo "Current Gitleaks scan failed."
+            exit 1
+          fi
+
+          if [ ! -s gitleaks-current-report.json ]; then
+            echo "Current Gitleaks report is missing or empty."
+            exit 1
+          fi
+
+          python -m json.tool gitleaks-current-report.json > /dev/null
       - name: Semgrep SAST scan
         run: |
           python -m pip install semgrep==1.180.0
