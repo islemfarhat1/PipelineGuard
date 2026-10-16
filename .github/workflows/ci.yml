@@ -99,6 +99,7 @@ jobs:
             exit 1
           fi
       - name: Scan PR commits with Gitleaks
+        id: gitleaks_pr_scan
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -117,6 +118,7 @@ jobs:
           set -e
 
           echo "PR Gitleaks exit code: $GITLEAKS_PR_EXIT_CODE"
+          echo "exit_code=$GITLEAKS_PR_EXIT_CODE" >> "$GITHUB_OUTPUT"
 
           if [ "$GITLEAKS_PR_EXIT_CODE" -ne 0 ] && [ "$GITLEAKS_PR_EXIT_CODE" -ne 1 ]; then
             echo "PR Gitleaks scan failed."
@@ -207,10 +209,30 @@ jobs:
 
       - name: PipelineGuard Security Gate
         env:
-          GITLEAKS_EXIT_CODE: ${{ steps.gitleaks_scan.outputs.exit_code }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITLEAKS_GLOBAL_EXIT_CODE: ${{ steps.gitleaks_scan.outputs.exit_code }}
+          GITLEAKS_PR_EXIT_CODE: ${{ steps.gitleaks_pr_scan.outputs.exit_code }}
         run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            GITLEAKS_REPORT="gitleaks-pr-report.json"
+            GITLEAKS_EXIT_CODE="$GITLEAKS_PR_EXIT_CODE"
+          else
+            GITLEAKS_REPORT="gitleaks-report.json"
+            GITLEAKS_EXIT_CODE="$GITLEAKS_GLOBAL_EXIT_CODE"
+          fi
+          if [ ! -s "$GITLEAKS_REPORT" ]; then
+            echo "ERROR: Gitleaks report is missing or empty."
+            exit 1
+          fi
+          if [ "$GITLEAKS_EXIT_CODE" != "0" ] && [ "$GITLEAKS_EXIT_CODE" != "1" ]; then
+            echo "ERROR: Invalid or missing Gitleaks exit code."
+            exit 1
+          fi
+
+          echo "Using Gitleaks report: $GITLEAKS_REPORT"
+
           python -m engine.cli \
             --trivy trivy-report.json \
             --semgrep semgrep-report.json \
-            --gitleaks gitleaks-report.json \
+            --gitleaks "$GITLEAKS_REPORT" \
             --gitleaks-exit-code "$GITLEAKS_EXIT_CODE"
