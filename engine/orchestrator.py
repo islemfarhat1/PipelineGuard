@@ -3,8 +3,11 @@ from engine.loader import load_scan_report
 from engine.models import Scanner
 from engine.policy import PolicyResult, evaluate_scans
 from engine.scan_validation import validate_gitleaks_exit_code
-
-
+from engine.models import ScanResult
+from engine.differential import compare_all_scans
+from engine.policy import Decision, evaluate_pr_policy
+from engine.git_comparison import get_verified_git_diff
+from engine.models import ScanStatus
 def run_pipelineguard(
     trivy_path: str,
     semgrep_path: str,
@@ -30,3 +33,136 @@ def run_pipelineguard(
     ]
 
     return evaluate_scans(scans)
+
+def run_pipelineguard_pr(
+    baseline_scans: list[ScanResult],
+    current_scans: list[ScanResult],
+    git_diff: str,
+) -> PolicyResult:
+    """
+    Evaluate PR findings against baseline findings.
+
+    Inputs must come from verified, comparable Git revisions.
+    """
+
+    if not isinstance(git_diff, str) or not git_diff.strip():
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=["Missing or empty Git diff"],
+        )
+
+    try:
+        differential = compare_all_scans(
+            baseline=baseline_scans,
+            current=current_scans,
+            git_diff=git_diff,
+        )
+
+    except ValueError as error:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=[
+                f"PR differential validation failed: {error}"
+            ],
+        )
+
+    return evaluate_pr_policy(differential)
+
+
+def run_pipelineguard_pr_from_git(
+    baseline_scans: list[ScanResult],
+    current_scans: list[ScanResult],
+    baseline_sha: str,
+    head_sha: str,
+    repo_path: str = ".",
+) -> PolicyResult:
+    """
+    Evaluate PR security findings using a verified Git comparison.
+
+    Scanner reports must be independently verified as belonging
+    to the specified baseline and head commits.
+    """
+
+    try:
+        git_diff = get_verified_git_diff(
+            baseline_sha=baseline_sha,
+            head_sha=head_sha,
+            repo_path=repo_path,
+        )
+
+        # A verified empty diff is valid when there are no changes.
+        differential = compare_all_scans(
+            baseline=baseline_scans,
+            current=current_scans,
+            git_diff=git_diff,
+        )
+
+        return evaluate_pr_policy(differential)
+
+    except (ValueError, OSError) as error:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=[f"PR analysis failed: {error}"],
+        )
+
+def run_pipelineguard_pr_from_reports(
+    baseline_trivy: str,
+    baseline_semgrep: str,
+    baseline_gitleaks: str,
+    current_trivy: str,
+    current_semgrep: str,
+    current_gitleaks: str,
+    baseline_gitleaks_exit_code: int,
+    current_gitleaks_exit_code: int,
+    baseline_sha: str,
+    head_sha: str,
+    repo_path: str = ".",
+) -> PolicyResult:
+    """
+    Load and evaluate baseline/current security reports.
+
+    Report provenance must be guaranteed by the CI workflow.
+    """
+    def load_revision_scans(
+        trivy_path: str,
+        semgrep_path: str,
+        gitleaks_path: str,
+        gitleaks_exit_code: int,
+    ) -> list[ScanResult]:
+
+        trivy = load_scan_report(Scanner.TRIVY, trivy_path)
+        semgrep = load_scan_report(Scanner.SEMGREP, semgrep_path)
+
+        gitleaks = load_scan_report(
+            Scanner.GITLEAKS,
+            gitleaks_path,
+        )
+        gitleaks = validate_gitleaks_exit_code(
+            gitleaks,
+            gitleaks_exit_code,
+        )
+        return [trivy, semgrep, gitleaks]
+
+    # Outside load_revision_scans, inside run_pipelineguard_pr_from_reports
+
+    baseline_scans = load_revision_scans(
+        baseline_trivy,
+        baseline_semgrep,
+        baseline_gitleaks,
+        baseline_gitleaks_exit_code,
+    )
+
+    current_scans = load_revision_scans(
+        current_trivy,
+        current_semgrep,
+        current_gitleaks,
+        current_gitleaks_exit_code,
+    )
+
+    return run_pipelineguard_pr_from_git(
+        baseline_scans=baseline_scans,
+        current_scans=current_scans,
+        baseline_sha=baseline_sha,
+        head_sha=head_sha,
+        repo_path=repo_path,
+    )
