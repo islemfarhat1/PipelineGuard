@@ -134,3 +134,38 @@ def evaluate_pr_policy(
         decision=Decision.PASS,
         reasons=["No blocking PR security findings detected"],
     )
+
+
+def evaluate_pr_commit_secrets(
+    pr_gitleaks_scan: ScanResult,
+) -> PolicyResult:
+    """
+    Block secrets introduced in PR commits,
+    including secrets removed before the final HEAD.
+    """
+
+    if pr_gitleaks_scan.scanner != Scanner.GITLEAKS:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=["Invalid PR commit scanner"],
+        )
+
+    if pr_gitleaks_scan.status != ScanStatus.SUCCESS:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=["PR commit Gitleaks scan failed"],
+        )
+
+    if pr_gitleaks_scan.findings:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=[
+                f"Secret detected in PR commits: {finding.identifier}"
+                for finding in pr_gitleaks_scan.findings
+            ],
+        )
+
+    return PolicyResult(
+        decision=Decision.PASS,
+        reasons=["No secrets detected in PR commits"],
+    )

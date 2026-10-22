@@ -82,3 +82,63 @@ def verify_provenance_manifest(
         return manifest == expected
     except (ValueError, TypeError, OSError):
         return False
+
+
+
+def create_pr_provenance_manifest(
+    baseline_sha: str,
+    head_sha: str,
+    reports: dict,
+    pr_gitleaks_report: str,
+) -> dict:
+    """
+    Create a seven-report manifest:
+    six revision reports and one PR commit-history report.
+    """
+    manifest = create_provenance_manifest(
+        baseline_sha,
+        head_sha,
+        reports,
+    )
+
+    if (
+        not isinstance(pr_gitleaks_report, str)
+        or not pr_gitleaks_report.strip()
+    ):
+        raise ValueError("Invalid PR Gitleaks report path")
+
+    manifest["pr_commit_scan"] = {
+        "gitleaks": {
+            "path": pr_gitleaks_report,
+            "sha256": calculate_report_sha256(
+                pr_gitleaks_report
+            ),
+        }
+    }
+
+    return manifest
+
+
+def verify_pr_provenance_manifest(
+    manifest: dict,
+    baseline_sha: str,
+    head_sha: str,
+    reports: dict,
+    pr_gitleaks_report: str,
+) -> bool:
+    """
+    Fail closed if any of the seven reports differs
+    from the manifest.
+    """
+    try:
+        expected = create_pr_provenance_manifest(
+            baseline_sha,
+            head_sha,
+            reports,
+            pr_gitleaks_report,
+        )
+
+        return manifest == expected
+
+    except (ValueError, TypeError, OSError):
+        return False

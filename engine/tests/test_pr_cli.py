@@ -1,105 +1,140 @@
-import json
+
+from unittest.mock import patch
 
 import pytest
 
-from engine.pr_cli import main
+from engine.models import (
+    Scanner,
+    ScanResult,
+    ScanStatus,
+    SecurityFinding,
+    Severity,
+)
 from engine.policy import Decision, PolicyResult
+from engine.orchestrator import run_pipelineguard_pr_with_commit_scan
 
 
 BASELINE = "a" * 40
 HEAD = "b" * 40
 
 
-def make_manifest(tmp_path):
-    reports = {}
+def make_test_manifest():
+    """
+    Minimal manifest for mocked integration tests.
 
-    for revision in ("baseline", "current"):
-        reports[revision] = {}
-
-        for scanner in ("trivy", "semgrep", "gitleaks"):
-            reports[revision][scanner] = {
-                "path": str(
-                    tmp_path / f"{revision}-{scanner}.json"
-                ),
-                "sha256": "0" * 64,
-            }
-
-    manifest = {
+    Actual report integrity is tested separately
+    in test_provenance.py and E2E tests.
+    """
+    return {
         "baseline_sha": BASELINE,
         "head_sha": HEAD,
-        "reports": reports,
+        "reports": {},
+        "pr_commit_scan": {
+            "gitleaks": {
+                "path": "pr-gitleaks.json",
+                "sha256": "0" * 64,
+            }
+        },
     }
-
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    return path
-
-
-def run_cli(manifest_path):
-    return main([
-        "--manifest", str(manifest_path),
-        "--baseline-sha", BASELINE,
-        "--head-sha", HEAD,
-        "--baseline-gitleaks-exit-code", "0",
-        "--current-gitleaks-exit-code", "0",
-    ])
 
 
 @pytest.mark.parametrize(
-    "decision,expected_code",
+    "differential_decision,has_secret,expected",
     [
-        (Decision.PASS, 0),
-        (Decision.BLOCK, 1),
+        (Decision.PASS, False, Decision.PASS),
+        (Decision.PASS, True, Decision.BLOCK),
+        (Decision.BLOCK, False, Decision.BLOCK),
+        (Decision.BLOCK, True, Decision.BLOCK),
     ],
 )
-def test_cli_decision(
-    tmp_path,
-    monkeypatch,
-    capsys,
-    decision,
-    expected_code,
+def test_pr_commit_scan_combined_decision(
+    differential_decision,
+    has_secret,
+    expected,
 ):
-    manifest = make_manifest(tmp_path)
+    findings = []
 
-    monkeypatch.setattr(
-        "engine.pr_cli.run_pipelineguard_pr_verified",
-        lambda **kwargs: PolicyResult(
-            decision=decision,
-            reasons=["Test policy result"],
-        ),
+    if has_secret:
+        findings.append(
+            SecurityFinding(
+                scanner=Scanner.GITLEAKS,
+                severity=Severity.CRITICAL,
+                title="Test secret",
+                identifier="pipelineguard-test-secret",
+                location="config.py:1",
+            )
+        )
+
+    scan = ScanResult(
+        scanner=Scanner.GITLEAKS,
+        status=ScanStatus.SUCCESS,
+        findings=findings,
     )
 
-    exit_code = run_cli(manifest)
-    output = capsys.readouterr().out
+    with (
+        patch(
+            "engine.orchestrator.verify_pr_provenance_manifest",
+            return_value=True,
+        ),
+        patch(
+            "engine.orchestrator.run_pipelineguard_pr_verified",
+            return_value=PolicyResult(
+                decision=differential_decision,
+                reasons=["Differential result"],
+            ),
+        ),
+        patch(
+            "engine.orchestrator.load_scan_report",
+            return_value=scan,
+        ),
+    ):
+        result = run_pipelineguard_pr_with_commit_scan(
+            manifest=make_test_manifest(),
+            baseline_sha=BASELINE,
+            head_sha=HEAD,
+            reports={},
+            baseline_gitleaks_exit_code=0,
+            current_gitleaks_exit_code=0,
+            pr_gitleaks_report="pr-gitleaks.json",
+            pr_gitleaks_exit_code=1 if has_secret else 0,
+        )
 
-    assert exit_code == expected_code
-    assert f"PipelineGuard PR Decision: {decision.value}" in output
-    assert "Test policy result" in output
+    assert result.decision == expected
 
 
-def test_missing_manifest_blocks(tmp_path, capsys):
-    exit_code = run_cli(tmp_path / "missing.json")
+def test_pr_commit_scan_invalid_exit_code_blocks():
+    scan = ScanResult(
+        scanner=Scanner.GITLEAKS,
+        status=ScanStatus.SUCCESS,
+        findings=[],
+    )
 
-    assert exit_code == 1
-    assert "BLOCK" in capsys.readouterr().out
+    with (
+        patch(
+            "engine.orchestrator.verify_pr_provenance_manifest",
+            return_value=True,
+        ),
+        patch(
+            "engine.orchestrator.run_pipelineguard_pr_verified",
+            return_value=PolicyResult(
+                decision=Decision.PASS,
+                reasons=["OK"],
+            ),
+        ),
+        patch(
+            "engine.orchestrator.load_scan_report",
+            return_value=scan,
+        ),
+    ):
+        result = run_pipelineguard_pr_with_commit_scan(
+            manifest=make_test_manifest(),
+            baseline_sha=BASELINE,
+            head_sha=HEAD,
+            reports={},
+            baseline_gitleaks_exit_code=0,
+            current_gitleaks_exit_code=0,
+            pr_gitleaks_report="pr-gitleaks.json",
+            pr_gitleaks_exit_code=2,
+        )
 
-
-def test_invalid_json_blocks(tmp_path, capsys):
-    path = tmp_path / "manifest.json"
-    path.write_text("{invalid json", encoding="utf-8")
-
-    exit_code = run_cli(path)
-
-    assert exit_code == 1
-    assert "BLOCK" in capsys.readouterr().out
-
-
-def test_incomplete_manifest_blocks(tmp_path, capsys):
-    path = tmp_path / "manifest.json"
-    path.write_text('{"reports": {}}', encoding="utf-8")
-
-    exit_code = run_cli(path)
-
-    assert exit_code == 1
-    assert "BLOCK" in capsys.readouterr().out
+    assert result.decision == Decision.BLOCK
