@@ -8,8 +8,7 @@ from engine.models import (
     ScanResult,
     ScanStatus,
 )
-from engine.models import Scanner, SecurityFinding, Severity
-
+from engine.differential import DifferentialResult
 
 class Decision(str, Enum):
     PASS = "PASS"
@@ -95,3 +94,78 @@ def evaluate_scans(scans: list[ScanResult]) -> PolicyResult:
     ]
 
     return evaluate_policy(all_findings)
+
+def evaluate_pr_policy(
+    differential: DifferentialResult,
+) -> PolicyResult:
+    reasons = []
+
+    # Evaluate findings introduced by the PR
+    for finding in differential.new:
+        if finding.scanner == Scanner.GITLEAKS:
+            reasons.append(
+                f"New secret detected: {finding.identifier}"
+            )
+
+        elif finding.severity in (Severity.HIGH, Severity.CRITICAL):
+            reasons.append(
+                f"New {finding.severity.value} finding: {finding.identifier}"
+            )
+
+    # Preserve V1 protections for existing findings
+    for finding in differential.existing:
+        if finding.scanner == Scanner.GITLEAKS:
+            reasons.append(
+                f"Existing secret detected: {finding.identifier}"
+            )
+
+        elif finding.severity == Severity.CRITICAL:
+            reasons.append(
+                f"Existing critical finding: {finding.identifier}"
+            )
+
+    if reasons:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=reasons,
+        )
+
+    return PolicyResult(
+        decision=Decision.PASS,
+        reasons=["No blocking PR security findings detected"],
+    )
+
+
+def evaluate_pr_commit_secrets(
+    pr_gitleaks_scan: ScanResult,
+) -> PolicyResult:
+    """
+    Block secrets introduced in PR commits,
+    including secrets removed before the final HEAD.
+    """
+
+    if pr_gitleaks_scan.scanner != Scanner.GITLEAKS:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=["Invalid PR commit scanner"],
+        )
+
+    if pr_gitleaks_scan.status != ScanStatus.SUCCESS:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=["PR commit Gitleaks scan failed"],
+        )
+
+    if pr_gitleaks_scan.findings:
+        return PolicyResult(
+            decision=Decision.BLOCK,
+            reasons=[
+                f"Secret detected in PR commits: {finding.identifier}"
+                for finding in pr_gitleaks_scan.findings
+            ],
+        )
+
+    return PolicyResult(
+        decision=Decision.PASS,
+        reasons=["No secrets detected in PR commits"],
+    )
