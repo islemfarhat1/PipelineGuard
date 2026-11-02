@@ -181,3 +181,64 @@ def test_gitleaks_missing_file_rejected():
         match="missing or invalid File"
     ):
         normalize_gitleaks(invalid_report)
+
+def test_trivy_same_cve_different_targets_remains_existing():
+    from engine.differential import compare_findings
+
+    def report(target):
+        return {
+            "Results": [
+                {
+                    "Target": target,
+                    "Class": "lang-pkgs",
+                    "Type": "python-pkg",
+                    "Vulnerabilities": [
+                        {
+                            "VulnerabilityID": "CVE-2026-TEST",
+                            "PkgName": "urllib3",
+                            "Severity": "HIGH",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    baseline = normalize_trivy(report("baseline-sbom.json"))
+    current = normalize_trivy(report("current-sbom.json"))
+
+    result = compare_findings(baseline, current)
+
+    assert len(result.existing) == 1
+    assert result.new == []
+    assert result.fixed == []
+
+
+
+def test_trivy_same_cve_different_packages_are_distinct():
+    from engine.differential import compare_findings
+
+    def report(package):
+        return {
+            "Results": [
+                {
+                    "Target": "dependencies",
+                    "Type": "python-pkg",
+                    "Vulnerabilities": [
+                        {
+                            "VulnerabilityID": "CVE-2026-TEST",
+                            "PkgName": package,
+                            "Severity": "HIGH",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    baseline = normalize_trivy(report("package-a"))
+    current = normalize_trivy(report("package-b"))
+
+    result = compare_findings(baseline, current)
+
+    assert len(result.new) == 1
+    assert len(result.fixed) == 1
+    assert result.existing == []

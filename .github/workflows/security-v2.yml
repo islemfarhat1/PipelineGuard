@@ -154,6 +154,8 @@ jobs:
         with:
           scan-type: fs
           scan-ref: baseline/demo-app
+          scanners: vuln
+          vuln-type: library
           format: json
           output: reports/baseline-trivy.json
           severity: HIGH,CRITICAL
@@ -164,81 +166,14 @@ jobs:
         with:
           scan-type: fs
           scan-ref: current/demo-app
+          scanners: vuln
+          vuln-type: library
           format: json
           output: reports/current-trivy.json
           severity: HIGH,CRITICAL
           exit-code: '0'
 
-      - name: Diagnose Trivy report structure
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          for revision in ("baseline", "current"):
-              path = Path(f"reports/{revision}-trivy.json")
-
-              print(f"\n=== {revision.upper()} TRIVY ===")
-              print(f"File exists: {path.exists()}")
-
-              if not path.exists():
-                  continue
-
-              data = json.loads(path.read_text(encoding="utf-8"))
-
-              if not isinstance(data, dict):
-                  print(f"Unexpected JSON type: {type(data).__name__}")
-                  continue
-
-              print(f"Top-level keys: {list(data.keys())}")
-              print(f"Results present: {'Results' in data}")
-              print(f"Results type: {type(data.get('Results')).__name__}")
-              print(f"Results count: {len(data['Results']) if isinstance(data.get('Results'), list) else 'N/A'}")
-          PY
-      - name: Normalize empty Trivy reports
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          for revision in ("baseline", "current"):
-              path = Path(f"reports/{revision}-trivy.json")
-              data = json.loads(path.read_text(encoding="utf-8"))
-
-              if not isinstance(data, dict):
-                  raise SystemExit(f"Invalid Trivy report: {path}")
-
-              required = (
-                  "SchemaVersion",
-                  "Trivy",
-                  "ArtifactName",
-                  "ArtifactType",
-              )
-
-              if any(not data.get(key) for key in required):
-                  raise SystemExit(f"Missing Trivy metadata: {path}")
-
-              if "Results" not in data:
-                  data["Results"] = []
-              elif not isinstance(data["Results"], list):
-                  raise SystemExit(f"Invalid Results field: {path}")
-
-              path.write_text(
-                  json.dumps(data, indent=2),
-                  encoding="utf-8",
-              )
-
-              print(f"{revision}: {len(data['Results'])} result groups")
-          PY
-
-
-      - name: Validate scanner reports
+      - name: Validate scanner reports and Trivy coverage
         shell: bash
         run: |
           set -euo pipefail
@@ -264,17 +199,39 @@ jobs:
               if not isinstance(trivy, dict):
                   raise SystemExit(f"Invalid Trivy report: {trivy_path}")
 
-              if not isinstance(trivy.get("Results"), list):
-                  raise SystemExit(f"Incomplete Trivy report: {trivy_path}")
+              required = (
+                  "SchemaVersion",
+                  "Trivy",
+                  "ArtifactName",
+                  "ArtifactType",
+              )
+
+              if any(not trivy.get(key) for key in required):
+                  raise SystemExit(
+                      f"Missing Trivy metadata: {trivy_path}"
+                  )
+
+              results = trivy.get("Results")
+
+              if not isinstance(results, list) or not results:
+                  raise SystemExit(
+                      f"Insufficient Trivy coverage: {trivy_path}. "
+                      "No dependency inventory was detected. "
+                      "A reproducible lockfile or SBOM is required."
+                  )
 
               if not isinstance(semgrep, dict):
                   raise SystemExit(f"Invalid Semgrep report: {semgrep_path}")
 
               if not isinstance(semgrep.get("results"), list):
-                  raise SystemExit(f"Incomplete Semgrep report: {semgrep_path}")
+                  raise SystemExit(
+                      f"Incomplete Semgrep report: {semgrep_path}"
+                  )
 
               if semgrep.get("errors"):
-                  raise SystemExit(f"Semgrep errors detected: {semgrep_path}")
+                  raise SystemExit(
+                      f"Semgrep errors detected: {semgrep_path}"
+                  )
 
           for revision in ("baseline", "current", "pr"):
               path = root / f"{revision}-gitleaks.json"
@@ -284,9 +241,11 @@ jobs:
               )
 
               if not isinstance(data, list):
-                  raise SystemExit(f"Invalid Gitleaks report: {path}")
+                  raise SystemExit(
+                      f"Invalid Gitleaks report: {path}"
+                  )
 
-          print("All scanner reports validated.")
+          print("Scanner reports and Trivy coverage validated.")
           PY
 
       - name: Record scan metadata
@@ -420,10 +379,18 @@ jobs:
                   (root / f"{revision}-semgrep.json").read_text(encoding="utf-8")
               )
 
-              if not isinstance(trivy, dict) or not isinstance(
-                  trivy.get("Results"), list
-              ):
+              if not isinstance(trivy, dict):
                   raise SystemExit(f"Invalid Trivy report: {revision}")
+
+              if not isinstance(trivy.get("Results"), list):
+                  raise SystemExit(
+                      f"Incomplete Trivy report: {revision}"
+                  )
+
+              if not trivy["Results"]:
+                  raise SystemExit(
+                      f"Insufficient Trivy coverage: {revision}"
+                  )
 
               if not isinstance(semgrep, dict) or not isinstance(
                   semgrep.get("results"), list
