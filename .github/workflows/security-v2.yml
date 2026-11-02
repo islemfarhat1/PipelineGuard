@@ -168,7 +168,7 @@ jobs:
           output: reports/current-trivy.json
           severity: HIGH,CRITICAL
           exit-code: '0'
-          
+
       - name: Diagnose Trivy report structure
         shell: bash
         run: |
@@ -198,6 +198,45 @@ jobs:
               print(f"Results type: {type(data.get('Results')).__name__}")
               print(f"Results count: {len(data['Results']) if isinstance(data.get('Results'), list) else 'N/A'}")
           PY
+      - name: Normalize empty Trivy reports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for revision in ("baseline", "current"):
+              path = Path(f"reports/{revision}-trivy.json")
+              data = json.loads(path.read_text(encoding="utf-8"))
+
+              if not isinstance(data, dict):
+                  raise SystemExit(f"Invalid Trivy report: {path}")
+
+              required = (
+                  "SchemaVersion",
+                  "Trivy",
+                  "ArtifactName",
+                  "ArtifactType",
+              )
+
+              if any(not data.get(key) for key in required):
+                  raise SystemExit(f"Missing Trivy metadata: {path}")
+
+              if "Results" not in data:
+                  data["Results"] = []
+              elif not isinstance(data["Results"], list):
+                  raise SystemExit(f"Invalid Results field: {path}")
+
+              path.write_text(
+                  json.dumps(data, indent=2),
+                  encoding="utf-8",
+              )
+
+              print(f"{revision}: {len(data['Results'])} result groups")
+          PY
+
 
       - name: Validate scanner reports
         shell: bash
