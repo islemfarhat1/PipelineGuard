@@ -168,6 +168,36 @@ jobs:
           output: reports/current-trivy.json
           severity: HIGH,CRITICAL
           exit-code: '0'
+          
+      - name: Diagnose Trivy report structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for revision in ("baseline", "current"):
+              path = Path(f"reports/{revision}-trivy.json")
+
+              print(f"\n=== {revision.upper()} TRIVY ===")
+              print(f"File exists: {path.exists()}")
+
+              if not path.exists():
+                  continue
+
+              data = json.loads(path.read_text(encoding="utf-8"))
+
+              if not isinstance(data, dict):
+                  print(f"Unexpected JSON type: {type(data).__name__}")
+                  continue
+
+              print(f"Top-level keys: {list(data.keys())}")
+              print(f"Results present: {'Results' in data}")
+              print(f"Results type: {type(data.get('Results')).__name__}")
+              print(f"Results count: {len(data['Results']) if isinstance(data.get('Results'), list) else 'N/A'}")
+          PY
 
       - name: Validate scanner reports
         shell: bash
