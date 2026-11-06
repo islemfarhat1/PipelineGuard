@@ -12,7 +12,7 @@ def normalize_trivy(report: dict) -> list[SecurityFinding]:
                 "Invalid Trivy report: result must be an object"
             )
 
-        target = result.get("Target", "unknown")
+        ecosystem = result.get("Type", "unknown")
 
         vulnerabilities = result.get("Vulnerabilities", [])
 
@@ -34,7 +34,10 @@ def normalize_trivy(report: dict) -> list[SecurityFinding]:
                 severity=Severity(severity_value),
                 title=vulnerability.get("Title") or "Unknown vulnerability",
                 identifier=vulnerability.get("VulnerabilityID", "UNKNOWN"),
-                location=f"{target}:{vulnerability.get('PkgName', 'unknown')}",
+                location=(
+    f"{ecosystem}:"
+    f"{vulnerability.get('PkgName', 'unknown')}"
+),
                 description=vulnerability.get("Description") or ""
             )
 

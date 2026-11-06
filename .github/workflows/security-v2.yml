@@ -1,0 +1,561 @@
+﻿
+name: PipelineGuard V2 Security Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: V2 Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout candidate repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout approved scanner configuration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Resolve comparison revisions
+        id: rev
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          cd candidate
+          git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA"
+
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+
+          baseline="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+
+          [[ "$baseline" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+          git worktree add --detach ../baseline "$baseline"
+          git worktree add --detach ../current "$HEAD_SHA"
+
+      - name: Install Semgrep and Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install semgrep==1.180.0
+
+          version=8.30.1
+
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
+            -o "$RUNNER_TEMP/gitleaks.tar.gz"
+
+          mkdir -p "$RUNNER_TEMP/pipelineguard-bin"
+
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" \
+            -C "$RUNNER_TEMP/pipelineguard-bin" gitleaks
+
+          chmod +x "$RUNNER_TEMP/pipelineguard-bin/gitleaks"
+
+          echo "$RUNNER_TEMP/pipelineguard-bin" >> "$GITHUB_PATH"
+
+      - name: Generate Semgrep reports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports
+
+          for revision in baseline current; do
+            semgrep scan \
+              --config "$GITHUB_WORKSPACE/trusted/semgrep-rules/python-security.yml" \
+              --json \
+              --output "$GITHUB_WORKSPACE/reports/${revision}-semgrep.json" \
+              "$GITHUB_WORKSPACE/${revision}/demo-app"
+
+            python -m json.tool \
+              "reports/${revision}-semgrep.json" > /dev/null
+          done
+
+      - name: Generate Gitleaks reports
+        id: leaks
+        shell: bash
+        env:
+          BASELINE_SHA: ${{ steps.rev.outputs.baseline }}
+          HEAD_SHA: ${{ steps.rev.outputs.head }}
+        run: |
+          set -euo pipefail
+
+          cd candidate
+
+          scan() {
+            local label="$1"
+            local range="$2"
+            local rc=0
+            local report="$GITHUB_WORKSPACE/reports/${label}-gitleaks.json"
+
+            gitleaks git \
+              --config "$GITHUB_WORKSPACE/trusted/.gitleaks.toml" \
+              --log-opts="$range" \
+              --redact \
+              --exit-code 1 \
+              --report-format json \
+              --report-path "$report" \
+              . || rc=$?
+
+            if [[ "$rc" -ne 0 && "$rc" -ne 1 ]]; then
+              echo "Gitleaks failed for $label: $rc" >&2
+              exit 1
+            fi
+
+            if [[ ! -s "$report" ]]; then
+              if [[ "$rc" -eq 0 ]]; then
+                printf '[]\n' > "$report"
+              else
+                echo "Missing Gitleaks report: $label" >&2
+                exit 1
+              fi
+            fi
+
+            python -m json.tool "$report" > /dev/null
+
+            echo "${label}_exit=$rc" >> "$GITHUB_OUTPUT"
+          }
+
+          scan baseline "$BASELINE_SHA"
+          scan current "$HEAD_SHA"
+          scan pr "${BASELINE_SHA}..${HEAD_SHA}"
+
+
+      - name: Generate trusted CycloneDX SBOMs
+        shell: bash
+        working-directory: trusted
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/reports"
+
+          for revision in baseline current; do
+            python -m engine.lockfile_sbom \
+              --lockfile "$GITHUB_WORKSPACE/${revision}/demo-app/requirements.lock" \
+              --output "$GITHUB_WORKSPACE/reports/${revision}-sbom.json"
+          done
+
+      - name: Scan CycloneDX SBOMs with Trivy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for revision in baseline current; do
+            docker run --rm \
+              --network bridge \
+              -v "$GITHUB_WORKSPACE/reports:/reports" \
+              aquasec/trivy:0.69.3 \
+              sbom \
+              --format json \
+              --scanners vuln \
+              --severity HIGH,CRITICAL \
+              --output "/reports/${revision}-trivy.json" \
+              "/reports/${revision}-sbom.json"
+          done
+
+      - name: Validate trusted SBOM inventories and Trivy reports
+        shell: bash
+        working-directory: trusted
+        run: |
+          set -euo pipefail
+
+          PYTHONPATH="$GITHUB_WORKSPACE/trusted" python - <<'PY'
+          from pathlib import Path
+          from engine.sbom_validation import (
+              validate_sbom,
+              validate_trivy_report,
+          )
+
+          root = Path.cwd().parent
+
+          for revision in ("baseline", "current"):
+              lockfile = root / revision / "demo-app" / "requirements.lock"
+              sbom = root / "reports" / f"{revision}-sbom.json"
+              trivy = root / "reports" / f"{revision}-trivy.json"
+
+              count = validate_sbom(lockfile, sbom)
+              python_results = validate_trivy_report(trivy)
+
+              print(
+                  f"{revision}: {count} locked packages, "
+                  f"{python_results} Python scan result(s) validated"
+              )
+          PY
+
+
+      - name: Validate scanner reports and Trivy coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("reports")
+
+          for revision in ("baseline", "current"):
+              trivy_path = root / f"{revision}-trivy.json"
+              semgrep_path = root / f"{revision}-semgrep.json"
+
+              trivy = json.loads(
+                  trivy_path.read_text(encoding="utf-8")
+              )
+
+              semgrep = json.loads(
+                  semgrep_path.read_text(encoding="utf-8")
+              )
+
+              if not isinstance(trivy, dict):
+                  raise SystemExit(f"Invalid Trivy report: {trivy_path}")
+
+              required = (
+                  "SchemaVersion",
+                  "Trivy",
+                  "ArtifactName",
+                  "ArtifactType",
+              )
+
+              if any(not trivy.get(key) for key in required):
+                  raise SystemExit(
+                      f"Missing Trivy metadata: {trivy_path}"
+                  )
+
+              results = trivy.get("Results")
+
+              if not isinstance(results, list) or not results:
+                  raise SystemExit(
+                      f"Insufficient Trivy coverage: {trivy_path}. "
+                      "No dependency inventory was detected. "
+                      "A reproducible lockfile or SBOM is required."
+                  )
+
+              if not isinstance(semgrep, dict):
+                  raise SystemExit(f"Invalid Semgrep report: {semgrep_path}")
+
+              if not isinstance(semgrep.get("results"), list):
+                  raise SystemExit(
+                      f"Incomplete Semgrep report: {semgrep_path}"
+                  )
+
+              if semgrep.get("errors"):
+                  raise SystemExit(
+                      f"Semgrep errors detected: {semgrep_path}"
+                  )
+
+          for revision in ("baseline", "current", "pr"):
+              path = root / f"{revision}-gitleaks.json"
+
+              data = json.loads(
+                  path.read_text(encoding="utf-8")
+              )
+
+              if not isinstance(data, list):
+                  raise SystemExit(
+                      f"Invalid Gitleaks report: {path}"
+                  )
+
+          print("Scanner reports and Trivy coverage validated.")
+          PY
+
+      - name: Record scan metadata
+        shell: bash
+        env:
+          BASELINE_SHA: ${{ steps.rev.outputs.baseline }}
+          HEAD_SHA: ${{ steps.rev.outputs.head }}
+          BASELINE_EXIT: ${{ steps.leaks.outputs.baseline_exit }}
+          CURRENT_EXIT: ${{ steps.leaks.outputs.current_exit }}
+          PR_EXIT: ${{ steps.leaks.outputs.pr_exit }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          data = {
+              "baseline_sha": os.environ["BASELINE_SHA"],
+              "head_sha": os.environ["HEAD_SHA"],
+              "baseline_gitleaks_exit": int(os.environ["BASELINE_EXIT"]),
+              "current_gitleaks_exit": int(os.environ["CURRENT_EXIT"]),
+              "pr_gitleaks_exit": int(os.environ["PR_EXIT"]),
+          }
+
+          Path("reports/scan-metadata.json").write_text(
+              json.dumps(data, indent=2),
+              encoding="utf-8"
+          )
+          PY
+
+      - name: Upload scan reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pipelineguard-v2-scan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
+
+  decision:
+    name: V2 Security Decision
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Require successful scans
+        shell: bash
+        env:
+          SCAN_RESULT: ${{ needs.scan.result }}
+        run: |
+          set -euo pipefail
+          test "$SCAN_RESULT" = "success"
+
+      - name: Checkout approved engine
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout candidate Git history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Download scan reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pipelineguard-v2-scan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: trusted/reports
+
+      - name: Validate reports and Git revisions
+        shell: bash
+        working-directory: trusted
+        env:
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("reports")
+
+          meta = json.loads(
+              (root / "scan-metadata.json").read_text(encoding="utf-8")
+          )
+
+          if meta.get("head_sha") != os.environ["EXPECTED_HEAD"]:
+              raise SystemExit("Unexpected PR head SHA")
+
+          if not re.fullmatch(
+              r"[0-9a-f]{40}",
+              str(meta.get("baseline_sha", ""))
+          ):
+              raise SystemExit("Invalid baseline SHA")
+
+          for key in (
+              "baseline_gitleaks_exit",
+              "current_gitleaks_exit",
+              "pr_gitleaks_exit",
+          ):
+              if type(meta.get(key)) is not int:
+                  raise SystemExit(f"Invalid exit code: {key}")
+
+              if meta[key] not in (0, 1):
+                  raise SystemExit(f"Unexpected exit code: {key}")
+
+          for revision in ("baseline", "current"):
+              trivy = json.loads(
+                  (root / f"{revision}-trivy.json").read_text(encoding="utf-8")
+              )
+
+              semgrep = json.loads(
+                  (root / f"{revision}-semgrep.json").read_text(encoding="utf-8")
+              )
+
+              if not isinstance(trivy, dict):
+                  raise SystemExit(f"Invalid Trivy report: {revision}")
+
+              if not isinstance(trivy.get("Results"), list):
+                  raise SystemExit(
+                      f"Incomplete Trivy report: {revision}"
+                  )
+
+              if not trivy["Results"]:
+                  raise SystemExit(
+                      f"Insufficient Trivy coverage: {revision}"
+                  )
+
+              if not isinstance(semgrep, dict) or not isinstance(
+                  semgrep.get("results"), list
+              ):
+                  raise SystemExit(f"Invalid Semgrep report: {revision}")
+
+              if semgrep.get("errors"):
+                  raise SystemExit(f"Semgrep errors: {revision}")
+
+          for revision in ("baseline", "current", "pr"):
+              data = json.loads(
+                  (root / f"{revision}-gitleaks.json").read_text(
+                      encoding="utf-8"
+                  )
+              )
+
+              if not isinstance(data, list):
+                  raise SystemExit(f"Invalid Gitleaks report: {revision}")
+          PY
+
+          git -C ../candidate fetch --no-tags origin \
+            "$EXPECTED_BASE" "$EXPECTED_HEAD"
+
+          test "$(git -C ../candidate rev-parse HEAD)" = "$EXPECTED_HEAD"
+
+          actual_baseline="$(
+            git -C ../candidate merge-base "$EXPECTED_BASE" "$EXPECTED_HEAD"
+          )"
+
+          reported_baseline="$(
+            python -c 'import json; print(json.load(open("reports/scan-metadata.json"))["baseline_sha"])'
+          )"
+
+          test "$actual_baseline" = "$reported_baseline"
+
+      - name: Revalidate trusted SBOM and Trivy reports
+        shell: bash
+        working-directory: trusted
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from engine.sbom_validation import validate_trivy_report
+
+          reports = Path("reports")
+
+          for revision in ("baseline", "current"):
+              sbom_path = reports / f"{revision}-sbom.json"
+              trivy_path = reports / f"{revision}-trivy.json"
+
+              sbom = json.loads(
+                  sbom_path.read_text(encoding="utf-8")
+              )
+
+              if sbom.get("bomFormat") != "CycloneDX":
+                  raise SystemExit(
+                      f"Invalid CycloneDX SBOM: {revision}"
+                  )
+
+              components = sbom.get("components")
+
+              if not isinstance(components, list) or not components:
+                  raise SystemExit(
+                      f"Missing SBOM components: {revision}"
+                  )
+
+              validate_trivy_report(trivy_path)
+
+              print(
+                  f"{revision}: {len(components)} SBOM components "
+                  "and Trivy Python coverage validated"
+              )
+          PY
+
+
+      - name: Generate SHA-256 report manifest
+        shell: bash
+        working-directory: trusted
+        run: |
+          set -euo pipefail
+
+          baseline="$(
+            python -c 'import json; print(json.load(open("reports/scan-metadata.json"))["baseline_sha"])'
+          )"
+
+          head="$(
+            python -c 'import json; print(json.load(open("reports/scan-metadata.json"))["head_sha"])'
+          )"
+
+          python -m engine.generate_pr_manifest \
+            --baseline-sha "$baseline" \
+            --head-sha "$head" \
+            --reports-dir reports \
+            --output reports/pr-manifest.json
+
+      - name: Run approved V2 policy
+        shell: bash
+        working-directory: trusted
+        run: |
+          set -euo pipefail
+
+          readarray -t args < <(python - <<'PY'
+          import json
+
+          with open("reports/scan-metadata.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          for key in (
+              "baseline_sha",
+              "head_sha",
+              "baseline_gitleaks_exit",
+              "current_gitleaks_exit",
+              "pr_gitleaks_exit",
+          ):
+              print(data[key])
+          PY
+          )
+
+          python -m engine.pr_cli \
+            --manifest reports/pr-manifest.json \
+            --baseline-sha "${args[0]}" \
+            --head-sha "${args[1]}" \
+            --repo-path ../candidate \
+            --baseline-gitleaks-exit-code "${args[2]}" \
+            --current-gitleaks-exit-code "${args[3]}" \
+            --pr-gitleaks-exit-code "${args[4]}"
