@@ -1,4 +1,4 @@
-
+﻿
 name: PipelineGuard V2 Security Gate
 
 on:
@@ -149,29 +149,38 @@ jobs:
           scan current "$HEAD_SHA"
           scan pr "${BASELINE_SHA}..${HEAD_SHA}"
 
-      - name: Scan baseline filesystem with Trivy
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-        with:
-          scan-type: fs
-          scan-ref: baseline/demo-app
-          scanners: vuln
-          vuln-type: library
-          format: json
-          output: reports/baseline-trivy.json
-          severity: HIGH,CRITICAL
-          exit-code: '0'
 
-      - name: Scan current filesystem with Trivy
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-        with:
-          scan-type: fs
-          scan-ref: current/demo-app
-          scanners: vuln
-          vuln-type: library
-          format: json
-          output: reports/current-trivy.json
-          severity: HIGH,CRITICAL
-          exit-code: '0'
+      - name: Generate trusted CycloneDX SBOMs
+        shell: bash
+        working-directory: trusted
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/reports"
+
+          for revision in baseline current; do
+            python -m engine.lockfile_sbom \
+              --lockfile "$GITHUB_WORKSPACE/${revision}/demo-app/requirements.lock" \
+              --output "$GITHUB_WORKSPACE/reports/${revision}-sbom.json"
+          done
+
+      - name: Scan CycloneDX SBOMs with Trivy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for revision in baseline current; do
+            docker run --rm \
+              --network bridge \
+              -v "$GITHUB_WORKSPACE/reports:/reports" \
+              aquasec/trivy:0.69.3 \
+              sbom \
+              --format json \
+              --scanners vuln \
+              --severity HIGH,CRITICAL \
+              --output "/reports/${revision}-trivy.json" \
+              "/reports/${revision}-sbom.json"
+          done
 
       - name: Validate scanner reports and Trivy coverage
         shell: bash
