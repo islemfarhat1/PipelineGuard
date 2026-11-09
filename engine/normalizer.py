@@ -188,7 +188,10 @@ def normalize_gitleaks(report: list[dict]) -> list[SecurityFinding]:
                 "Description", "Potential exposed secret"
             ),
             identifier=secret["RuleID"],
-            location=f"{secret['File']}:{secret['StartLine']}",
+            location=(
+                f"{validate_repository_path(secret['File'])}:"
+                f"{secret['StartLine']}"
+            ),
             description="Potential secret detected by Gitleaks"
         )
 

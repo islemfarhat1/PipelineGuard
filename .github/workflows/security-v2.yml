@@ -116,22 +116,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          cd candidate
-
+          # usage: scan <label> <directory> <gitleaks arguments...>
+          # Always run from inside the directory with a relative target so
+          # that reported paths stay repository-relative.
           scan() {
             local label="$1"
-            local range="$2"
+            local directory="$2"
+            shift 2
             local rc=0
             local report="$GITHUB_WORKSPACE/reports/${label}-gitleaks.json"
 
-            gitleaks git \
-              --config "$GITHUB_WORKSPACE/trusted/.gitleaks.toml" \
-              --log-opts="$range" \
-              --redact \
-              --exit-code 1 \
-              --report-format json \
-              --report-path "$report" \
-              . || rc=$?
+            (
+              cd "$directory" && gitleaks "$@" \
+                --config "$GITHUB_WORKSPACE/trusted/.gitleaks.toml" \
+                --redact \
+                --exit-code 1 \
+                --report-format json \
+                --report-path "$report"
+            ) || rc=$?
 
             if [[ "$rc" -ne 0 && "$rc" -ne 1 ]]; then
               echo "Gitleaks failed for $label: $rc" >&2
@@ -152,9 +154,16 @@ jobs:
             echo "${label}_exit=$rc" >> "$GITHUB_OUTPUT"
           }
 
-          scan baseline "$BASELINE_SHA"
-          scan current "$HEAD_SHA"
-          scan pr "${BASELINE_SHA}..${HEAD_SHA}"
+          # baseline/current: files as they exist at each revision.
+          # A single SHA in --log-opts would read every ancestor commit, so
+          # one old secret would block all future pull requests.
+          scan baseline "$GITHUB_WORKSPACE/baseline" dir .
+          scan current "$GITHUB_WORKSPACE/current" dir .
+
+          # pr: only the commits introduced by this pull request, including
+          # secrets added and then removed before the final commit.
+          scan pr "$GITHUB_WORKSPACE/candidate" git \
+            --log-opts="${BASELINE_SHA}..${HEAD_SHA}" .
 
 
       - name: Generate trusted CycloneDX SBOMs
