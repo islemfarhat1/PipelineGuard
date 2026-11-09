@@ -89,12 +89,19 @@ jobs:
 
           mkdir -p reports
 
+          # Scan from each revision's root with a relative target so that
+          # reported paths ("demo-app/app.py") are identical between
+          # baseline and current and match the paths used by `git diff`.
           for revision in baseline current; do
-            semgrep scan \
-              --config "$GITHUB_WORKSPACE/trusted/semgrep-rules/python-security.yml" \
-              --json \
-              --output "$GITHUB_WORKSPACE/reports/${revision}-semgrep.json" \
-              "$GITHUB_WORKSPACE/${revision}/demo-app"
+            (
+              cd "$GITHUB_WORKSPACE/${revision}"
+              semgrep scan \
+                --metrics=off \
+                --config "$GITHUB_WORKSPACE/trusted/semgrep-rules/python-security.yml" \
+                --json \
+                --output "$GITHUB_WORKSPACE/reports/${revision}-semgrep.json" \
+                demo-app
+            )
 
             python -m json.tool \
               "reports/${revision}-semgrep.json" > /dev/null
