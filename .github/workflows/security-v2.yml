@@ -60,18 +60,22 @@ jobs:
           git worktree add --detach ../baseline "$baseline"
           git worktree add --detach ../current "$HEAD_SHA"
 
-      - name: Install Semgrep and Gitleaks
+      - name: Install Gitleaks (checksum verified)
         shell: bash
         run: |
           set -euo pipefail
 
-          python -m pip install semgrep==1.180.0
-
           version=8.30.1
+          # From the official gitleaks_8.30.1_checksums.txt release asset.
+          sha256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 
           curl --fail --location --silent --show-error --retry 3 \
             "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
             -o "$RUNNER_TEMP/gitleaks.tar.gz"
+
+          # Fail closed before extraction if the archive is not the
+          # expected one (replaced release asset, corrupted download...).
+          echo "${sha256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict -
 
           mkdir -p "$RUNNER_TEMP/pipelineguard-bin"
 
@@ -84,24 +88,31 @@ jobs:
 
       - name: Generate Semgrep reports
         shell: bash
+        env:
+          # Pinned by digest: the tag alone could be moved to another image.
+          SEMGREP_IMAGE: semgrep/semgrep:1.180.0@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3
         run: |
           set -euo pipefail
 
           mkdir -p reports
 
-          # Scan from each revision's root with a relative target so that
-          # reported paths ("demo-app/app.py") are identical between
+          # Scan from each revision's root (-w) with a relative target so
+          # that reported paths ("demo-app/app.py") are identical between
           # baseline and current and match the paths used by `git diff`.
+          # No network: the scanner only needs local rules and files.
           for revision in baseline current; do
-            (
-              cd "$GITHUB_WORKSPACE/${revision}"
+            docker run --rm \
+              --network none \
+              -v "$GITHUB_WORKSPACE:/work" \
+              -w "/work/${revision}" \
+              "$SEMGREP_IMAGE" \
               semgrep scan \
                 --metrics=off \
-                --config "$GITHUB_WORKSPACE/trusted/semgrep-rules/python-security.yml" \
+                --disable-version-check \
+                --config /work/trusted/semgrep-rules/python-security.yml \
                 --json \
-                --output "$GITHUB_WORKSPACE/reports/${revision}-semgrep.json" \
+                --output "/work/reports/${revision}-semgrep.json" \
                 demo-app
-            )
 
             python -m json.tool \
               "reports/${revision}-semgrep.json" > /dev/null
@@ -189,7 +200,7 @@ jobs:
             docker run --rm \
               --network bridge \
               -v "$GITHUB_WORKSPACE/reports:/reports" \
-              aquasec/trivy:0.69.3 \
+              aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c \
               sbom \
               --format json \
               --scanners vuln \

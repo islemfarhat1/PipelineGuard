@@ -129,6 +129,8 @@ jobs:
         shell: bash
         env:
           GITLEAKS_VERSION: "8.30.1"
+          # From the official gitleaks_8.30.1_checksums.txt release asset.
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
           GIT_SCAN_RANGE: ${{ steps.git_range.outputs.range }}
         run: |
           set -euo pipefail
@@ -140,6 +142,9 @@ jobs:
 
           curl -fsSL -o gitleaks.tar.gz \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+
+          # Fail closed before extraction if the archive is not the expected one.
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check --strict -
 
           tar -xzf gitleaks.tar.gz gitleaks
 
@@ -189,16 +194,24 @@ jobs:
 
       - name: Semgrep SAST scan
         shell: bash
+        env:
+          # Pinned by digest: the tag alone could be moved to another image.
+          SEMGREP_IMAGE: semgrep/semgrep:1.180.0@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3
         run: |
           set -euo pipefail
 
-          python -m pip install semgrep==1.180.0
-
-          semgrep scan \
-            --config semgrep-rules/python-security.yml \
-            --json \
-            --output semgrep-report.json \
-            demo-app
+          docker run --rm \
+            --network none \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            "$SEMGREP_IMAGE" \
+            semgrep scan \
+              --metrics=off \
+              --disable-version-check \
+              --config semgrep-rules/python-security.yml \
+              --json \
+              --output semgrep-report.json \
+              demo-app
 
           if [ ! -s semgrep-report.json ]; then
             echo "Semgrep report is missing or empty."
