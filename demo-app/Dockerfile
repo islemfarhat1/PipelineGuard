@@ -23,6 +23,13 @@ RUN rm -rf /opt/venv/lib/python3.12/site-packages/pip \
     /usr/local/lib/python3.12/site-packages/pip \
     /usr/local/lib/python3.12/site-packages/pip-*.dist-info
 
+# Least privilege: the application never needs root. Its files stay owned
+# by root, so the process can read but not modify its own code.
+RUN useradd --system --uid 10001 --no-create-home \
+    --shell /usr/sbin/nologin appuser
+
+USER 10001
+
 EXPOSE 8000
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

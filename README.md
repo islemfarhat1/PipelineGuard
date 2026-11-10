@@ -73,7 +73,8 @@ engine/
   normalizer.py           Security finding normalization
   policy.py               Policy evaluation
   orchestrator.py         Security evaluation orchestration
-  provenance.py           Report provenance utilities
+  provenance.py           SHA-256 report manifest (detects reports changed
+                          between CI jobs; not an independent proof of origin)
   lockfile_sbom.py        CycloneDX SBOM generation
   sbom_validation.py      SBOM and Trivy report validation
   scan_validation.py      Scan report validation

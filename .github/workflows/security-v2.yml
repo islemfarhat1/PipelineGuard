@@ -344,6 +344,25 @@ jobs:
           )
           PY
 
+      # Sealed here, before upload, and verified by the decision job after
+      # download: a report that changes between the two jobs makes the
+      # decision BLOCK. It cannot prove that a report was correct when it
+      # was written (same workflow, same trust level).
+      - name: Seal reports with a SHA-256 manifest
+        shell: bash
+        env:
+          BASELINE_SHA: ${{ steps.rev.outputs.baseline }}
+          HEAD_SHA: ${{ steps.rev.outputs.head }}
+        run: |
+          set -euo pipefail
+
+          PYTHONPATH="$GITHUB_WORKSPACE/trusted" \
+            python -m engine.generate_pr_manifest \
+              --baseline-sha "$BASELINE_SHA" \
+              --head-sha "$HEAD_SHA" \
+              --reports-dir reports \
+              --output reports/pr-manifest.json
+
       - name: Upload scan reports
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -492,7 +511,9 @@ jobs:
 
           test "$actual_baseline" = "$reported_baseline"
 
-      - name: Revalidate trusted SBOM and Trivy reports
+      # Structure check only. The full comparison of each SBOM against its
+      # lockfile (validate_sbom) runs in the scan job.
+      - name: Check SBOM structure and Trivy Python coverage
         shell: bash
         working-directory: trusted
         run: |
@@ -534,26 +555,6 @@ jobs:
               )
           PY
 
-
-      - name: Generate SHA-256 report manifest
-        shell: bash
-        working-directory: trusted
-        run: |
-          set -euo pipefail
-
-          baseline="$(
-            python -c 'import json; print(json.load(open("reports/scan-metadata.json"))["baseline_sha"])'
-          )"
-
-          head="$(
-            python -c 'import json; print(json.load(open("reports/scan-metadata.json"))["head_sha"])'
-          )"
-
-          python -m engine.generate_pr_manifest \
-            --baseline-sha "$baseline" \
-            --head-sha "$head" \
-            --reports-dir reports \
-            --output reports/pr-manifest.json
 
       - name: Run approved V2 policy
         shell: bash
