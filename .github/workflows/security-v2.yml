@@ -3,7 +3,8 @@ name: PipelineGuard V2 Security Gate
 
 on:
   pull_request:
-    branches: [main]
+    # TEMPORARY - exists only on validation/t3-baseline, never on main.
+    branches: [main, validation/t3-baseline]
 
 permissions:
   contents: read
