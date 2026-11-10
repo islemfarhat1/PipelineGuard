@@ -19,6 +19,9 @@ def health():
     }
 
 
+# T3 shift: these three comment lines move the existing fixture down.
+# The eval() line itself is not modified, so its finding must stay
+# EXISTING (not NEW) and the pull request must PASS.
 # VALIDATION FIXTURE (T3) - to be removed after validation.
 # Constant input only: no user data can reach eval(), so this is not
 # exploitable. It exists so main contains one pre-existing Semgrep finding.
