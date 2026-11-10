@@ -2,7 +2,7 @@
 
 **Differential DevSecOps Security Gate for GitHub Pull Requests**
 
-> **Status:** V2 finalized — release in preparation (`v2.0.0`).
+> **Status:** V2.0.0 released — development of V2 is closed.
 
 PipelineGuard is a Python security gate for GitHub pull requests. It combines secret detection (Gitleaks), static analysis (Semgrep) and dependency vulnerability scanning (Trivy on a CycloneDX SBOM), then takes a PASS/BLOCK decision with its own policy engine.
 
@@ -178,7 +178,7 @@ semgrep-rules/
 
 ## Limitations
 
-- **Workflow trust boundary.** With `pull_request`, GitHub runs the workflow file from the pull request. A pull request can modify `security-v2.yml` itself. Making `V2 Security Decision` a required status check and protecting `.github/` with `CODEOWNERS` and mandatory review are needed for real enforcement. Until then, a red check informs but does not prevent merging.
+- **Workflow trust boundary.** With `pull_request`, GitHub runs the workflow file from the pull request. A pull request can modify `security-v2.yml` itself. Branch protection is not configured yet: a red `V2 Security Decision` check informs but does not prevent merging. Planned when the repository is made public: make `V2 Security Decision` a required status check on `main`. Even then, protecting `.github/` with `CODEOWNERS` and mandatory review by a second maintainer would be needed for real enforcement.
 - **Report manifest.** It detects reports changed between the scan and decision jobs. It does not prove that a report was correct when written, since both jobs belong to the same workflow. Engine messages still use the word "provenance" for this check.
 - **SBOM scope.** The SBOM is derived from the lockfile. It is not an independent inventory of the final container.
 - **Container OS packages** are scanned only after merge, by the `security-posture` job on `main`, which runs only when commits are pushed. They are not part of the pull request differential.
@@ -192,4 +192,4 @@ Python · GitHub Actions · Docker · FastAPI · Semgrep · Gitleaks · Trivy ·
 
 ## Project status
 
-**V2 finalized — release in preparation (`v2.0.0`).** No new features are planned for V2. Remaining release steps: protecting `main` (required status check and `CODEOWNERS`), removing validation branches, and tagging `v2.0.0`.
+**V2.0.0 released.** Development of V2 is closed; no further features are planned for this version.
