@@ -178,7 +178,7 @@ semgrep-rules/
 
 ## Limitations
 
-- **Workflow trust boundary.** With `pull_request`, GitHub runs the workflow file from the pull request. A pull request can modify `security-v2.yml` itself. Branch protection is not configured yet: a red `V2 Security Decision` check informs but does not prevent merging. Planned when the repository is made public: make `V2 Security Decision` a required status check on `main`. Even then, protecting `.github/` with `CODEOWNERS` and mandatory review by a second maintainer would be needed for real enforcement.
+- **Workflow trust boundary.** With `pull_request`, GitHub runs the workflow file from the pull request. A pull request can modify `security-v2.yml` itself. `main` is protected by a ruleset: changes go through a pull request, `V2 Security Decision` must pass, branches must be up to date before merging, and force pushes and deletion are blocked. Because a pull request can still change the workflow that produces this check, protecting `.github/` with `CODEOWNERS` and mandatory review by a second maintainer would be needed for real enforcement.
 - **Report manifest.** It detects reports changed between the scan and decision jobs. It does not prove that a report was correct when written, since both jobs belong to the same workflow. Engine messages still use the word "provenance" for this check.
 - **SBOM scope.** The SBOM is derived from the lockfile. It is not an independent inventory of the final container.
 - **Container OS packages** are scanned only after merge, by the `security-posture` job on `main`, which runs only when commits are pushed. They are not part of the pull request differential.
