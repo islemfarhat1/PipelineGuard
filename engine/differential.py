@@ -228,9 +228,15 @@ def compare_all_scans(
                 f"{source}: duplicate scanners"
             )
 
-        if any(scan.status != ScanStatus.SUCCESS for scan in scans):
+        failed = [
+            f"{scan.scanner.value} ({scan.error_message or 'unknown error'})"
+            for scan in scans
+            if scan.status != ScanStatus.SUCCESS
+        ]
+
+        if failed:
             raise ValueError(
-                f"{source}: one or more scanners failed"
+                f"{source}: scanner failed: " + "; ".join(failed)
             )
 
     validate(baseline, "Baseline")

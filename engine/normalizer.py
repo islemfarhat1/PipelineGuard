@@ -1,4 +1,40 @@
+from pathlib import PurePosixPath, PureWindowsPath
+
 from engine.models import Scanner, SecurityFinding, Severity
+
+
+def validate_repository_path(path: object) -> str:
+    """
+    Require a canonical path relative to the repository root.
+
+    Differential analysis compares finding locations between two
+    checkouts and against `git diff`. Both only work when every report
+    uses the same repository-relative form ("demo-app/app.py").
+    Absolute or ambiguous paths are rejected (fail closed) instead of
+    silently producing false NEW/FIXED classifications.
+    """
+
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("Invalid finding path: missing path")
+
+    if "\\" in path:
+        raise ValueError(
+            f"Invalid finding path: use '/' separators: {path}"
+        )
+
+    posix = PurePosixPath(path)
+
+    if posix.is_absolute() or PureWindowsPath(path).drive:
+        raise ValueError(
+            f"Invalid finding path: must be repository-relative: {path}"
+        )
+
+    if any(part in ("..", ".") for part in path.split("/")):
+        raise ValueError(
+            f"Invalid finding path: must be canonical: {path}"
+        )
+
+    return path
 
 def normalize_trivy(report: dict) -> list[SecurityFinding]:
     if not isinstance(report, dict):
@@ -85,15 +121,22 @@ def normalize_semgrep(report: dict) -> list[SecurityFinding]:
             )
 
 
+        path = validate_repository_path(result.get("path"))
+
+        start = result.get("start")
+        line = start.get("line") if isinstance(start, dict) else None
+
+        if type(line) is not int or line < 1:
+            raise ValueError(
+                "Invalid Semgrep finding: invalid start line"
+            )
+
         finding = SecurityFinding(
             scanner=Scanner.SEMGREP,
             severity=severity_mapping[severity_value],
             title=extra.get("message", "Unknown finding"),
             identifier=result.get("check_id", "UNKNOWN"),
-            location=(
-                f"{result.get('path', 'unknown')}:"
-                f"{result.get('start', {}).get('line', 0)}"
-            ),
+            location=f"{path}:{line}",
             description=extra.get("message", "")
         )
 
@@ -145,7 +188,10 @@ def normalize_gitleaks(report: list[dict]) -> list[SecurityFinding]:
                 "Description", "Potential exposed secret"
             ),
             identifier=secret["RuleID"],
-            location=f"{secret['File']}:{secret['StartLine']}",
+            location=(
+                f"{validate_repository_path(secret['File'])}:"
+                f"{secret['StartLine']}"
+            ),
             description="Potential secret detected by Gitleaks"
         )
 

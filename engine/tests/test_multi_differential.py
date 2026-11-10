@@ -87,7 +87,7 @@ def test_compare_all_scans_rejects_failed_current_scanner():
 
     with pytest.raises(
         ValueError,
-        match="Current: one or more scanners failed",
+        match=r"Current: scanner failed: trivy \(Trivy execution failed\)",
     ):
         compare_all_scans(baseline, current)
 
