@@ -2,165 +2,194 @@
 
 **Differential DevSecOps Security Gate for GitHub Pull Requests**
 
-PipelineGuard is a Python-based security gate that combines static application security testing, secret detection, dependency vulnerability scanning, and policy-driven decisions.
+> **Status:** V2 finalized — release in preparation (`v2.0.0`).
 
-Its V2 workflow evaluates security findings introduced by a pull request relative to a Git baseline, rather than automatically blocking every finding already present in the repository.
+PipelineGuard is a Python security gate for GitHub pull requests. It combines secret detection (Gitleaks), static analysis (Semgrep) and dependency vulnerability scanning (Trivy on a CycloneDX SBOM), then takes a PASS/BLOCK decision with its own policy engine.
 
-## Key Features
+Its main idea is **differential analysis**: a pull request is judged on the findings it introduces, compared with the commit it started from, instead of being blocked by every problem that already exists in the repository.
 
-- **Semgrep:** Static analysis using project security rules.
-- **Gitleaks:** Detection of exposed secrets.
-- **Trivy:** Vulnerability scanning of software dependencies.
-- **CycloneDX SBOM:** Software inventory generated from the Python lockfile.
-- **Differential analysis:** Comparison of baseline and candidate findings.
-- **Policy engine:** Automated PASS/BLOCK security decisions.
-- **Report validation:** Integrity and structure checks designed to fail closed when required evidence is invalid.
-- **GitHub Actions:** Automated security evaluation of pull requests.
+PipelineGuard is an educational and portfolio project. It is not a production-hardened security boundary (see [Limitations](#limitations)).
+
+## Why a differential gate
+
+A repository with existing findings makes a classic "block on any finding" gate fail on every pull request, even one that only fixes a typo. Teams then disable the gate. PipelineGuard V2 compares two scans of the same pull request:
+
+- **baseline**: the merge-base, where the pull request branch started;
+- **current**: the head of the pull request.
+
+The merge-base is used rather than the latest commit on `main`, so that work merged by other people after the branch was created is not attributed to this pull request.
+
+| Present in baseline | Present in current | Classification |
+|---|---|---|
+| No | Yes | **NEW** |
+| Yes | Yes | **EXISTING** |
+| Yes | No | **FIXED** |
+
+Semgrep findings whose lines only moved (for example because lines were added above them) are matched through the `git diff` hunks and stay **EXISTING**.
+
+## Decision policy
+
+| Classification | Blocks the pull request |
+|---|---|
+| NEW | Secrets, HIGH and CRITICAL findings |
+| EXISTING | Secrets and CRITICAL findings |
+| FIXED | Never |
+
+In addition, **any secret found in the commits of the pull request blocks it**, even if a later commit removed it: once pushed, a secret must be considered exposed and revoked.
+
+Semgrep `ERROR` maps to HIGH, `WARNING` to MEDIUM and `INFO` to INFO.
+
+Every invalid, missing or inconsistent input **blocks** (fail closed): missing scanner, scanner failure, malformed report, non-canonical file path, Gitleaks exit code that contradicts its report, report changed between CI jobs.
 
 ## Architecture
 
 ```text
-                 GitHub Pull Request
-                         |
-                         v
-                 GitHub Actions V2
-                         |
-             +-----------+-----------+
-             |                       |
-             v                       v
-       Git Baseline              PR Candidate
-             |                       |
-             +-----------+-----------+
-                         |
-                         v
-                Security Scanners
-              /          |          \
-         Semgrep      Gitleaks      Trivy
-              \          |          /
-               Security Scan Reports
-                         |
-                         v
-                Report Validation
-                         |
-                         v
-               Differential Analysis
-                         |
-                         v
-                  Policy Engine
-                         |
-                         v
-                    PASS / BLOCK
+                       Pull request to main
+                               |
+              security-v2.yml  |  (pull_request)
+                               v
+  +------------------------ V2 Scan job ------------------------+
+  |  candidate checkout (PR head)    trusted checkout (base)    |
+  |  baseline worktree (merge-base)  current worktree (head)    |
+  |                                                             |
+  |  Semgrep  files of baseline and current  (pinned image,     |
+  |           rules from trusted, no network)                   |
+  |  Gitleaks files of baseline and current  (gitleaks dir)     |
+  |           commits baseline..head         (gitleaks git)     |
+  |  Trivy    CycloneDX SBOMs from the lockfiles (pinned image) |
+  |                                                             |
+  |  validate reports -> seal them in a SHA-256 manifest        |
+  +-----------------------------+-------------------------------+
+                                | artifact
+                                v
+  +---------------------- V2 Decision job ----------------------+
+  |  engine and policy from trusted (base commit)               |
+  |  verify revisions, report structure and manifest            |
+  |  differential analysis -> policy -> PASS / BLOCK            |
+  +-------------------------------------------------------------+
+
+                         Push to main
+                               |
+                ci.yml         v
+        ci job: tests, rule tests, Docker build (also on PRs)
+        security-posture job (push only): image scan with Trivy,
+        Gitleaks on pushed commits, Semgrep, V1 decision
 ```
 
-The V2 workflow also generates CycloneDX SBOMs from locked Python dependencies and validates the corresponding Trivy scan reports.
+The two workflows have separate roles:
 
-## Repository Structure
+- `security-v2.yml` is the **pull request gate**.
+- `ci.yml` runs tests and the Docker build on pull requests and pushes. Its `security-posture` job runs **only on pushes to `main`**: it reports the health of code that is already accepted (including OS packages of the container image) and never judges pull requests.
 
-```text
-.github/workflows/
-  ci.yml                  Original CI workflow
-  security-v2.yml         Differential security workflow
+## Security controls
 
-demo-app/
-  app.py                  Demo FastAPI application
-  Dockerfile              Application container
-  requirements.lock       Locked Python dependencies
-  tests/                  Application tests
+| Control | What it does |
+|---|---|
+| Trusted engine and rules | The policy engine, Semgrep rules and Gitleaks configuration come from the base commit (`trusted/`). A pull request that edits them does not change its own evaluation. The V2 gate never executes the scanned code (the separate `ci` job does run the project's tests, with read-only permissions). |
+| Fail closed | Any invalid or missing evidence produces BLOCK. |
+| Canonical paths | Findings must use repository-relative paths (`demo-app/app.py`). Absolute or ambiguous paths are rejected instead of being misclassified. |
+| Pinned actions | Every GitHub Action is pinned by commit SHA. |
+| Pinned tools | Gitleaks is verified against its official SHA-256 before extraction. Trivy and Semgrep images are pinned by digest. Semgrep runs with `--network none`. |
+| Report manifest | Reports are sealed in a SHA-256 manifest in the scan job and verified in the decision job: a report changed between the two jobs blocks the pull request. |
+| Locked dependencies | The demo application is installed with `--require-hashes` from `requirements.lock`; the SBOM is checked against that lockfile. |
+| Least privilege | Workflows use `contents: read`. The demo container runs as an unprivileged user (uid 10001). |
 
-engine/
-  differential.py         Differential finding analysis
-  git_comparison.py       Git comparison utilities
-  normalizer.py           Security finding normalization
-  policy.py               Policy evaluation
-  orchestrator.py         Security evaluation orchestration
-  provenance.py           SHA-256 report manifest (detects reports changed
-                          between CI jobs; not an independent proof of origin)
-  lockfile_sbom.py        CycloneDX SBOM generation
-  sbom_validation.py      SBOM and Trivy report validation
-  scan_validation.py      Scan report validation
-  tests/                  Engine test suite
+## Semgrep rules
 
-semgrep-rules/
-  python-security.yml     Project Semgrep rules
-```
+Project rules live in `semgrep-rules/python-security.yml`. All of them use severity `ERROR` (HIGH).
 
-## How It Works
+| Rule | Detects | CWE |
+|---|---|---|
+| `pipelineguard-dangerous-eval` | `eval(...)` | CWE-95 |
+| `pipelineguard-dangerous-exec` | `exec(...)` | CWE-95 |
+| `pipelineguard-command-injection` | `subprocess.*(..., shell=True)` and `os.system(...)` with a non-constant command | CWE-78 |
+| `pipelineguard-insecure-deserialization` | `pickle.load(...)`, `pickle.loads(...)` | CWE-502 |
 
-1. A pull request triggers the V2 GitHub Actions workflow.
-2. The workflow prepares baseline and candidate security evidence.
-3. Security scanners generate findings for evaluation.
-4. The pipeline validates required scan reports and their integrity.
-5. The differential engine identifies findings introduced by the candidate changes.
-6. The policy engine produces an automated security decision.
+Each rule has positive (`ruleid:`) and negative (`ok:`) cases in `semgrep-rules/python-security.py`, checked in CI with `semgrep --test`.
 
-A **PASS** indicates that the configured security controls accepted the evaluated change. It does not prove that the application is free of vulnerabilities.
-
-## Software Bill of Materials
-
-PipelineGuard generates a CycloneDX 1.6 SBOM from the Python dependency lockfile.
-
-The SBOM represents the locked dependency inventory. It is not an independently verified inventory of every package installed in the running container.
-
-Trivy analyzes the SBOM for known vulnerabilities. The workflow validates the report structure and requires evidence of Python package scanning.
-
-This validation does not independently prove that every locked component was successfully evaluated by Trivy.
-
-## Running Tests
-
-From the repository root:
-
-```bash
-python -m pytest engine/tests -q
-```
-
-Latest locally verified result:
-
-```text
-174 passed in 4.83s
-```
-
-## CI/CD
-
-The repository includes two GitHub Actions workflows:
-
-- `ci.yml`: Original continuous integration workflow.
-- `security-v2.yml`: Differential pull-request security workflow.
-
-The V2 workflow separates security scanning and security decision processing.
-
-## Security Limitations
-
-PipelineGuard V2 is an educational and portfolio-oriented DevSecOps prototype.
-
-Important limitations include:
-
-- Pull-request workflows may use workflow definitions supplied by the candidate branch. A malicious workflow modification can undermine security controls.
-- Trusted engine execution alone does not make the complete workflow tamper-proof.
-- Lockfile-derived SBOMs do not independently verify the contents of the final runtime container.
-- Validating the presence of Python scan results does not establish complete per-component vulnerability coverage.
-- Scanner databases, configuration, and available vulnerability intelligence affect detection.
-- Scanner images should be pinned by immutable digest for stronger supply-chain assurance.
-- Repository rules, protected branches, and review requirements are necessary for stronger enforcement.
-
-PipelineGuard should not be considered a production-hardened security boundary without additional controls and independent security review.
+These are **pattern-based rules, not a data-flow analysis**: they do not know where a value comes from. The `eval`, `exec` and `pickle` rules report every call, including safe ones (false positives). A constant shell command is not reported, which reduces injection risk but does not make the command safe.
 
 ## Validation
 
-The V2 implementation was validated through:
+The V2 behaviour was validated on real GitHub Actions runs, in addition to the test suite.
 
-- Python unit and integration tests.
-- GitHub Actions security checks.
-- Pull-request integration.
-- Negative security test scenarios involving Semgrep and Gitleaks findings.
+| Scenario | PR | Expected | Result |
+|---|---|---|---|
+| Differential fixes merged | #20 | PASS, V1 skipped on PR, `security-posture` runs on push | ✅ |
+| New `eval` endpoint (code injection) | #21 | BLOCK — `New HIGH finding` | ✅ |
+| Fake secret added then removed inside the PR | #22 | BLOCK — `Secret detected in PR commits` | ✅ |
+| Existing `eval` moved down by three lines | #23 | PASS (finding stays EXISTING) | ✅ |
+| Tool integrity (checksum, digests, offline Semgrep) | #24 | PASS | ✅ |
+| New `eval` with the pinned offline Semgrep image | #25 | BLOCK — `New HIGH finding` | ✅ |
+| Manifest sealed between jobs, non-root container | #26 | PASS | ✅ |
 
-At the time of V2 integration, the engine test suite completed with **174 passing tests**.
+Test pull requests #21, #22, #23 and #25 were closed without merging. #23 targeted a temporary branch containing a harmless `eval("1 + 1")` fixture, so that no HIGH finding was ever introduced into `main`; its only workflow change was the trigger filter.
 
-## Technology Stack
+Locally verified as well: a modified Gitleaks archive is rejected by `sha256sum --check`; missing, invalid or modified reports and manifests all produce BLOCK; each Semgrep rule test fails when its rule is deliberately broken.
+
+## Running the tests
+
+```bash
+# Engine tests (214 at the time of finalization)
+python -m pytest engine/tests -q
+
+# Demo application tests
+cd demo-app && python -m pytest -q
+
+# Semgrep rule tests (same pinned image as CI)
+docker run --rm --network none -v "$PWD:/work" -w /work \
+  semgrep/semgrep:1.180.0@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3 \
+  semgrep --test --metrics=off --disable-version-check semgrep-rules/
+```
+
+Note: Semgrep run natively on Windows writes paths with `\`. The engine rejects them on purpose (non-canonical paths); use the Docker image above or a Linux environment.
+
+## Repository structure
+
+```text
+.github/workflows/
+  security-v2.yml         Pull request gate (scan job + decision job)
+  ci.yml                  Tests, rule tests, Docker build; posture scan on main
+
+demo-app/
+  app.py                  Demo FastAPI application
+  Dockerfile              Multi-stage, hash-locked, non-root image
+  requirements.lock       Locked Python dependencies with hashes
+
+engine/
+  differential.py         NEW / EXISTING / FIXED classification
+  line_mapping.py         Line translation through git diff hunks
+  git_comparison.py       Verified git diff between two commits
+  normalizer.py           Scanner reports -> common findings
+  policy.py               PASS / BLOCK rules
+  orchestrator.py         V1 and V2 evaluation flows
+  pr_cli.py, cli.py       V2 and V1 command-line entry points
+  provenance.py           SHA-256 report manifest (detects reports changed
+                          between CI jobs; not an independent proof of origin)
+  generate_pr_manifest.py Manifest generation (scan job)
+  lockfile_sbom.py        CycloneDX SBOM from the lockfile
+  sbom_validation.py      SBOM and Trivy report validation
+  tests/                  Engine and workflow guard tests
+
+semgrep-rules/
+  python-security.yml     Project Semgrep rules
+  python-security.py      Rule test cases (semgrep --test)
+```
+
+## Limitations
+
+- **Workflow trust boundary.** With `pull_request`, GitHub runs the workflow file from the pull request. A pull request can modify `security-v2.yml` itself. Making `V2 Security Decision` a required status check and protecting `.github/` with `CODEOWNERS` and mandatory review are needed for real enforcement. Until then, a red check informs but does not prevent merging.
+- **Report manifest.** It detects reports changed between the scan and decision jobs. It does not prove that a report was correct when written, since both jobs belong to the same workflow. Engine messages still use the word "provenance" for this check.
+- **SBOM scope.** The SBOM is derived from the lockfile. It is not an independent inventory of the final container.
+- **Container OS packages** are scanned only after merge, by the `security-posture` job on `main`, which runs only when commits are pushed. They are not part of the pull request differential.
+- **No exceptions mechanism.** An existing CRITICAL finding, such as a newly published CVE in a locked dependency, blocks every pull request until it is fixed.
+- **Gitleaks history.** The pull request gate scans the files of both revisions and the commits of the pull request. History before the merge-base is not rescanned.
+- **Detection coverage.** Four pattern-based Semgrep rules, Python only. Scanner databases and configuration limit what can be found. A PASS means the configured controls accepted the change, not that the code is free of vulnerabilities.
+
+## Technology stack
 
 Python · GitHub Actions · Docker · FastAPI · Semgrep · Gitleaks · Trivy · CycloneDX · Pytest
 
-## Project Status
+## Project status
 
-**V2 implemented and merged into the main branch.**
-
-Future production hardening would require stronger workflow trust boundaries, repository enforcement controls, and more comprehensive verification of scanner coverage.
+**V2 finalized — release in preparation (`v2.0.0`).** No new features are planned for V2. Remaining release steps: protecting `main` (required status check and `CODEOWNERS`), removing validation branches, and tagging `v2.0.0`.

@@ -15,14 +15,15 @@ def translate_line(old_line: int, diff: str) -> int | None:
     # @@ -3,1 +3,2 @@
     # @@ -3 +3,2 @@
     # @@ -1,0 +2,5 @@
-        # Reject multi-file diffs until file-specific mapping is supported.
+
+    # Reject multi-file diffs until file-specific mapping is supported.
     if len(re.findall(r"^diff --git ", diff, flags=re.MULTILINE)) > 1:
         return None
     pattern = r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"
     matches = list(re.finditer(pattern, diff))
 
     if not matches or old_line < 1:
-     return None
+        return None
 
     # Extract and validate every Git hunk before calculating line shifts.
     hunk_contents = extract_hunk_lines(diff, matches)

@@ -32,7 +32,8 @@ def test_pull_request_job_keeps_tests_and_build():
 def test_pull_request_job_does_not_run_the_v1_gate_or_scanners():
     ci_job, _ = ci_jobs()
 
-    for forbidden in ("engine.cli", "trivy", "gitleaks", "semgrep"):
+    # `semgrep --test` (testing the rules) is allowed; scanning is not.
+    for forbidden in ("engine.cli", "trivy", "gitleaks", "semgrep scan"):
         assert forbidden not in ci_job.lower()
 
 

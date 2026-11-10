@@ -43,6 +43,25 @@ jobs:
       - name: Run PipelineGuard Engine tests
         run: python -m pytest engine/tests/ -v
 
+      # Tests the rules themselves against semgrep-rules/python-security.py.
+      # It does not scan the application and takes no security decision.
+      - name: Test Semgrep rules
+        shell: bash
+        env:
+          SEMGREP_IMAGE: semgrep/semgrep:1.180.0@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --network none \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            "$SEMGREP_IMAGE" \
+            semgrep --test \
+              --metrics=off \
+              --disable-version-check \
+              semgrep-rules/
+
       - name: Build Docker image
         run: docker build -t pipelineguard-demo ./demo-app
 

@@ -9,3 +9,50 @@ rules:
       category: security
       cwe:
         - "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+
+  # Pattern-based rules: they match calls, not data flow. They do not know
+  # whether an argument comes from an untrusted source, so they can report
+  # safe code (false positives) and miss variants (false negatives).
+
+  - id: pipelineguard-dangerous-exec
+    languages:
+      - python
+    severity: ERROR
+    message: "Potentially dangerous use of exec(). Avoid executing dynamically built code."
+    pattern: exec(...)
+    metadata:
+      category: security
+      cwe:
+        - "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+
+  - id: pipelineguard-command-injection
+    languages:
+      - python
+    severity: ERROR
+    message: "Shell command built from a non-constant value. Prefer subprocess with an argument list and shell=False."
+    # A constant command is not reported. That reduces injection risk but
+    # is not a guarantee of safety.
+    pattern-either:
+      - patterns:
+          - pattern: subprocess.$FUNC(..., shell=True, ...)
+          - pattern-not: subprocess.$FUNC("...", ..., shell=True, ...)
+      - patterns:
+          - pattern: os.system(...)
+          - pattern-not: os.system("...")
+    metadata:
+      category: security
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command"
+
+  - id: pipelineguard-insecure-deserialization
+    languages:
+      - python
+    severity: ERROR
+    message: "pickle can execute code while loading. Never unpickle data that is not fully trusted; prefer JSON."
+    pattern-either:
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+    metadata:
+      category: security
+      cwe:
+        - "CWE-502: Deserialization of Untrusted Data"

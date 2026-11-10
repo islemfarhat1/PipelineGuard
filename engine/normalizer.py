@@ -71,9 +71,9 @@ def normalize_trivy(report: dict) -> list[SecurityFinding]:
                 title=vulnerability.get("Title") or "Unknown vulnerability",
                 identifier=vulnerability.get("VulnerabilityID", "UNKNOWN"),
                 location=(
-    f"{ecosystem}:"
-    f"{vulnerability.get('PkgName', 'unknown')}"
-),
+                    f"{ecosystem}:"
+                    f"{vulnerability.get('PkgName', 'unknown')}"
+                ),
                 description=vulnerability.get("Description") or ""
             )
 
