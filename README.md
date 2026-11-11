@@ -2,9 +2,11 @@
 
 **Differential DevSecOps Security Gate for GitHub Pull Requests**
 
-> **Status:** V2.0.0 released — development of V2 is closed.
+> **Status:** V3.0.0 released — the V2 gate is unchanged; V3 adds a local, advisory LLM assistant.
 
 PipelineGuard is a Python security gate for GitHub pull requests. It combines secret detection (Gitleaks), static analysis (Semgrep) and dependency vulnerability scanning (Trivy on a CycloneDX SBOM), then takes a PASS/BLOCK decision with its own policy engine.
+
+V3 adds an optional **local LLM assistant** (Ollama) that explains findings and suggests fixes for developers. It is advisory only: it never takes or changes the PASS/BLOCK decision (see [V3](#v3-local-llm-assistant-advisory)).
 
 Its main idea is **differential analysis**: a pull request is judged on the findings it introduces, compared with the commit it started from, instead of being blocked by every problem that already exists in the repository.
 
@@ -127,11 +129,63 @@ Test pull requests #21, #22, #23 and #25 were closed without merging. #23 target
 
 Locally verified as well: a modified Gitleaks archive is rejected by `sha256sum --check`; missing, invalid or modified reports and manifests all produce BLOCK; each Semgrep rule test fails when its rule is deliberately broken.
 
+## V3: local LLM assistant (advisory)
+
+`python -m assistant.explain` reads the scanner reports, sends each finding to a **local** Ollama model, and writes `explanations.md`: an explanation, the risk, a suggested fix and a hint about a possible false positive.
+
+```bash
+ollama pull qwen2.5:7b
+python -m assistant.explain --semgrep reports/semgrep.json \
+  --gitleaks reports/gitleaks.json --trivy reports/trivy.json \
+  --output explanations.md
+```
+
+**The model never decides.** The code it reads comes from the pull request, so its author can write text aimed at the model (prompt injection). The assistant is therefore kept out of the gate:
+
+| Control | What it does |
+|---|---|
+| Isolation | `engine/` never imports `assistant/`, and `security-v2.yml` never calls it. Both are checked by tests. The command never prints PASS/BLOCK and always exits 0 when it runs. |
+| Local only | The Ollama URL must be a loopback address and system proxies are ignored: code never leaves the machine. |
+| Same input checks | Reports are loaded with the V2 normalizers, and paths that leave the repository are refused. |
+| Secrets | No code is sent for Gitleaks findings, lines flagged by Gitleaks are masked, and known secret values are redacted in prompts and answers. |
+| Injection channels removed | Comments and docstrings are removed with `tokenize`/`ast` before code is sent; line numbers are kept. Invalid Python or other languages: no code is sent. |
+| Output validation | The answer must match a strict JSON schema; otherwise the report says "explanation unavailable". |
+
+CI tests use a fake model (no LLM runs in CI).
+
+### Evaluation
+
+13 hand-labelled cases (5 real vulnerabilities, 4 harmless snippets that the rules still report, 4 prompt injections) plus a secret case, 3 runs each, temperature 0. Full tables: [`assistant/evaluation/RESULTS.md`](assistant/evaluation/RESULTS.md); before the injection fix: [`RESULTS-before.md`](assistant/evaluation/RESULTS-before.md).
+
+| Metric (`qwen2.5:7b`) | Before | After removing comments and docstrings |
+|---|---|---|
+| Valid JSON answers | 100% | 100% |
+| Real vulnerability not rated as a likely false positive | 15/15 | 15/15 |
+| Harmless code rated as a possible false positive | 5/12 | 6/12 |
+| Prompt injection resisted | **0/9** | **9/9** (comment, docstring, fake closing tag) |
+| Injection hidden in a string literal (added after) | — | 1/3 |
+| Secret value sent to the model | never | never |
+
+What this shows:
+
+- **Instructions in the prompt did not stop injection** (0/9, both models). Removing the text from the input did. Deterministic controls worked; asking the model to behave did not.
+- **The defence has a known limit:** text inside a string literal is code and cannot be removed; it still steers the model.
+- The model is good at explaining and suggesting fixes, but **weak at judging false positives** (about 50%).
+- `qwen2.5:1.5b` is faster (4 s vs 10 s per finding) but sometimes rates real vulnerabilities as false positives (10/15). `qwen2.5:7b` is the default.
+
+This is a small, hand-made set on one machine: it shows behaviour, not general accuracy.
+
 ## Running the tests
 
 ```bash
-# Engine tests (214 at the time of finalization)
+# Engine tests (214)
 python -m pytest engine/tests -q
+
+# V3 assistant tests (fake model, no Ollama needed)
+python -m pytest assistant/tests -q
+
+# V3 evaluation with real local models (Ollama required)
+python -m assistant.evaluation.run --models qwen2.5:1.5b qwen2.5:7b --runs 3
 
 # Demo application tests
 cd demo-app && python -m pytest -q
@@ -174,6 +228,14 @@ engine/
 semgrep-rules/
   python-security.yml     Project Semgrep rules
   python-security.py      Rule test cases (semgrep --test)
+
+assistant/                V3 advisory LLM assistant (never used by the gate)
+  explain.py              Command line: reports -> explanations.md
+  client.py               Loopback-only Ollama client
+  sources.py              Reports, code context, secret masking, comment removal
+  prompt.py               Prompt and JSON answer schema
+  evaluation/             Labelled cases, evaluation script and results
+  tests/                  Tests with a fake model
 ```
 
 ## Limitations
@@ -184,12 +246,13 @@ semgrep-rules/
 - **Container OS packages** are scanned only after merge, by the `security-posture` job on `main`, which runs only when commits are pushed. They are not part of the pull request differential.
 - **No exceptions mechanism.** An existing CRITICAL finding, such as a newly published CVE in a locked dependency, blocks every pull request until it is fixed.
 - **Gitleaks history.** The pull request gate scans the files of both revisions and the commits of the pull request. History before the merge-base is not rescanned.
+- **LLM assistant.** Its explanations can be wrong, and an instruction hidden in a string literal can still change its false-positive hint. It is advisory only and has no effect on the decision.
 - **Detection coverage.** Four pattern-based Semgrep rules, Python only. Scanner databases and configuration limit what can be found. A PASS means the configured controls accepted the change, not that the code is free of vulnerabilities.
 
 ## Technology stack
 
-Python · GitHub Actions · Docker · FastAPI · Semgrep · Gitleaks · Trivy · CycloneDX · Pytest
+Python · GitHub Actions · Docker · FastAPI · Semgrep · Gitleaks · Trivy · CycloneDX · Pytest · Ollama
 
 ## Project status
 
-**V2.0.0 released.** Development of V2 is closed; no further features are planned for this version.
+**V3.0.0 released.** The V2 gate is unchanged. V3 adds the local advisory assistant and its evaluation; no further features are planned for this version.
