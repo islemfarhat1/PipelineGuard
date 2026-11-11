@@ -1,4 +1,7 @@
+import ast
+import io
 import json
+import tokenize
 from pathlib import Path
 
 from engine.models import Scanner, SecurityFinding
@@ -74,6 +77,48 @@ def redact(text: str, secrets: set[str]) -> str:
     return text
 
 
+REMOVED_TEXT = '"[text removed]"'
+
+
+def strip_comments_and_docstrings(source: str) -> list[str] | None:
+    """
+    Remove comments and standalone string statements (docstrings).
+
+    They are free text that the author of the code controls, and the
+    evaluation showed that a model follows instructions written there.
+    Line numbers are kept. Returns None if the source is not valid
+    Python: then no code is sent at all.
+    """
+
+    try:
+        tree = ast.parse(source)
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (SyntaxError, tokenize.TokenError, ValueError):
+        return None
+
+    lines = source.splitlines()
+
+    # tokenize knows that a "#" inside a string is not a comment.
+    for token in tokens:
+        if token.type == tokenize.COMMENT:
+            row, column = token.start
+            lines[row - 1] = lines[row - 1][:column].rstrip()
+
+    # A string used as a statement does nothing at run time: it is text,
+    # like a comment (docstrings are the usual case).
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            for row in range(node.lineno, node.end_lineno + 1):
+                lines[row - 1] = ""
+            lines[node.lineno - 1] = " " * node.col_offset + REMOVED_TEXT
+
+    return lines
+
+
 def read_code_context(finding: SecurityFinding, repo_root: str,
                       secrets: set[str],
                       secret_locations: set[tuple[str, int]],
@@ -97,10 +142,15 @@ def read_code_context(finding: SecurityFinding, repo_root: str,
     if not file_path.is_relative_to(root):
         raise ValueError(f"Finding path escapes the repository: {path}")
 
-    if not file_path.is_file():
+    # Only Python can be cleaned safely; anything else is not sent.
+    if not file_path.is_file() or file_path.suffix != ".py":
         return ""
 
-    lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = strip_comments_and_docstrings(
+        file_path.read_text(encoding="utf-8", errors="replace")
+    )
+    if lines is None:
+        return ""
 
     start = max(1, line - radius)
     end = min(len(lines), line + radius)
