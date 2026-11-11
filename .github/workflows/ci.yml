@@ -43,6 +43,10 @@ jobs:
       - name: Run PipelineGuard Engine tests
         run: python -m pytest engine/tests/ -v
 
+      # V3 assistant tests use a fake model: no LLM runs in CI.
+      - name: Run assistant tests
+        run: python -m pytest assistant/tests/ -v
+
       # Tests the rules themselves against semgrep-rules/python-security.py.
       # It does not scan the application and takes no security decision.
       - name: Test Semgrep rules
