@@ -18,3 +18,5 @@ venv/
 
 .pytest_cache/
 .coverage
+# V3 assistant output (can contain code excerpts)
+explanations.md
