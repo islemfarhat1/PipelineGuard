@@ -65,7 +65,8 @@ def build_prompt(finding: SecurityFinding, code_context: str) -> str:
 
     if code_context:
         parts += [
-            "Code around the finding (the reported line starts with >>):",
+            "Code around the finding. Comments and docstrings were removed "
+            "before sending; the reported line starts with >>:",
             "<untrusted_code>",
             field(code_context),
             "</untrusted_code>",
