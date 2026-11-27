@@ -19,4 +19,4 @@ def health():
     }
 @app.get("/demo-calculation")
 def demo_calculation():
-    return {"result": eval("1 + 1")}
+    return {"result": 1 + 1}
