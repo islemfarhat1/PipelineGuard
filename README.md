@@ -1,258 +1,69 @@
-﻿# PipelineGuard
+﻿
+# PipelineGuard
 
-**Differential DevSecOps Security Gate for GitHub Pull Requests**
+**Differential DevSecOps Security Gate with a Local LLM Assistant**
 
-> **Status:** V3.0.0 released — the V2 gate is unchanged; V3 adds a local, advisory LLM assistant.
+PipelineGuard automates security checks on GitHub pull requests by combining static analysis, secret detection and dependency vulnerability scanning.
 
-PipelineGuard is a Python security gate for GitHub pull requests. It combines secret detection (Gitleaks), static analysis (Semgrep) and dependency vulnerability scanning (Trivy on a CycloneDX SBOM), then takes a PASS/BLOCK decision with its own policy engine.
+Unlike traditional security gates, it distinguishes newly introduced findings from existing security debt, allowing teams to improve security without unnecessarily blocking development.
 
-V3 adds an optional **local LLM assistant** (Ollama) that explains findings and suggests fixes for developers. It is advisory only: it never takes or changes the PASS/BLOCK decision (see [V3](#v3-local-llm-assistant-advisory)).
+## Key Features
 
-Its main idea is **differential analysis**: a pull request is judged on the findings it introduces, compared with the commit it started from, instead of being blocked by every problem that already exists in the repository.
-
-PipelineGuard is an educational and portfolio project. It is not a production-hardened security boundary (see [Limitations](#limitations)).
-
-## Why a differential gate
-
-A repository with existing findings makes a classic "block on any finding" gate fail on every pull request, even one that only fixes a typo. Teams then disable the gate. PipelineGuard V2 compares two scans of the same pull request:
-
-- **baseline**: the merge-base, where the pull request branch started;
-- **current**: the head of the pull request.
-
-The merge-base is used rather than the latest commit on `main`, so that work merged by other people after the branch was created is not attributed to this pull request.
-
-| Present in baseline | Present in current | Classification |
-|---|---|---|
-| No | Yes | **NEW** |
-| Yes | Yes | **EXISTING** |
-| Yes | No | **FIXED** |
-
-Semgrep findings whose lines only moved (for example because lines were added above them) are matched through the `git diff` hunks and stay **EXISTING**.
-
-## Decision policy
-
-| Classification | Blocks the pull request |
-|---|---|
-| NEW | Secrets, HIGH and CRITICAL findings |
-| EXISTING | Secrets and CRITICAL findings |
-| FIXED | Never |
-
-In addition, **any secret found in the commits of the pull request blocks it**, even if a later commit removed it: once pushed, a secret must be considered exposed and revoked.
-
-Semgrep `ERROR` maps to HIGH, `WARNING` to MEDIUM and `INFO` to INFO.
-
-Every invalid, missing or inconsistent input **blocks** (fail closed): missing scanner, scanner failure, malformed report, non-canonical file path, Gitleaks exit code that contradicts its report, report changed between CI jobs.
+- **Multi-scanner analysis:** Semgrep (SAST), Gitleaks (secrets) and Trivy (SBOM-based dependency scanning).
+- **Differential analysis:** NEW, EXISTING and FIXED findings.
+- **Deterministic security gate:** automated PASS/BLOCK decisions with a fail-closed policy.
+- **Security hardening:** pinned tools, trusted engine and rules, report integrity verification.
+- **Local AI assistant:** optional LLM-generated explanations and remediation suggestions, independent of security decisions.
 
 ## Architecture
 
-```text
-                       Pull request to main
-                               |
-              security-v2.yml  |  (pull_request)
-                               v
-  +------------------------ V2 Scan job ------------------------+
-  |  candidate checkout (PR head)    trusted checkout (base)    |
-  |  baseline worktree (merge-base)  current worktree (head)    |
-  |                                                             |
-  |  Semgrep  files of baseline and current  (pinned image,     |
-  |           rules from trusted, no network)                   |
-  |  Gitleaks files of baseline and current  (gitleaks dir)     |
-  |           commits baseline..head         (gitleaks git)     |
-  |  Trivy    CycloneDX SBOMs from the lockfiles (pinned image) |
-  |                                                             |
-  |  validate reports -> seal them in a SHA-256 manifest        |
-  +-----------------------------+-------------------------------+
-                                | artifact
-                                v
-  +---------------------- V2 Decision job ----------------------+
-  |  engine and policy from trusted (base commit)               |
-  |  verify revisions, report structure and manifest            |
-  |  differential analysis -> policy -> PASS / BLOCK            |
-  +-------------------------------------------------------------+
+![PipelineGuard Architecture](docs/diagrams/pipelineguard-architecture.png)
 
-                         Push to main
-                               |
-                ci.yml         v
-        ci job: tests, rule tests, Docker build (also on PRs)
-        security-posture job (push only): image scan with Trivy,
-        Gitleaks on pushed commits, Semgrep, V1 decision
-```
+## Security Policy
 
-The two workflows have separate roles:
-
-- `security-v2.yml` is the **pull request gate**.
-- `ci.yml` runs tests and the Docker build on pull requests and pushes. Its `security-posture` job runs **only on pushes to `main`**: it reports the health of code that is already accepted (including OS packages of the container image) and never judges pull requests.
-
-## Security controls
-
-| Control | What it does |
-|---|---|
-| Trusted engine and rules | The policy engine, Semgrep rules and Gitleaks configuration come from the base commit (`trusted/`). A pull request that edits them does not change its own evaluation. The V2 gate never executes the scanned code (the separate `ci` job does run the project's tests, with read-only permissions). |
-| Fail closed | Any invalid or missing evidence produces BLOCK. |
-| Canonical paths | Findings must use repository-relative paths (`demo-app/app.py`). Absolute or ambiguous paths are rejected instead of being misclassified. |
-| Pinned actions | Every GitHub Action is pinned by commit SHA. |
-| Pinned tools | Gitleaks is verified against its official SHA-256 before extraction. Trivy and Semgrep images are pinned by digest. Semgrep runs with `--network none`. |
-| Report manifest | Reports are sealed in a SHA-256 manifest in the scan job and verified in the decision job: a report changed between the two jobs blocks the pull request. |
-| Locked dependencies | The demo application is installed with `--require-hashes` from `requirements.lock`; the SBOM is checked against that lockfile. |
-| Least privilege | Workflows use `contents: read`. The demo container runs as an unprivileged user (uid 10001). |
-
-## Semgrep rules
-
-Project rules live in `semgrep-rules/python-security.yml`. All of them use severity `ERROR` (HIGH).
-
-| Rule | Detects | CWE |
+| Classification | Description | Blocking conditions |
 |---|---|---|
-| `pipelineguard-dangerous-eval` | `eval(...)` | CWE-95 |
-| `pipelineguard-dangerous-exec` | `exec(...)` | CWE-95 |
-| `pipelineguard-command-injection` | `subprocess.*(..., shell=True)` and `os.system(...)` with a non-constant command | CWE-78 |
-| `pipelineguard-insecure-deserialization` | `pickle.load(...)`, `pickle.loads(...)` | CWE-502 |
+| NEW | Introduced by the PR | Secrets, HIGH, CRITICAL |
+| EXISTING | Already present in the baseline | Secrets, CRITICAL |
+| FIXED | Removed by the PR | Never |
 
-Each rule has positive (`ruleid:`) and negative (`ok:`) cases in `semgrep-rules/python-security.py`, checked in CI with `semgrep --test`.
+Secrets detected in PR commits also block the PR, even if removed in a later commit. Missing, invalid or inconsistent security evidence results in BLOCK.
 
-These are **pattern-based rules, not a data-flow analysis**: they do not know where a value comes from. The `eval`, `exec` and `pickle` rules report every call, including safe ones (false positives). A constant shell command is not reported, which reduces injection risk but does not make the command safe.
+## Local LLM Assistant
+
+The optional assistant uses Ollama to explain scanner findings, assess risks and suggest remediation.
+
+It runs locally, on demand, using scanner reports and relevant code context.
+
+**The LLM never takes or changes the PASS/BLOCK decision.**
 
 ## Validation
 
-The V2 behaviour was validated on real GitHub Actions runs, in addition to the test suite.
+- 259 automated engine and assistant tests.
+- Real GitHub Actions validation of PASS and BLOCK scenarios.
+- Detection of secrets added and subsequently removed within a PR.
+- Differential matching of findings whose source lines have moved.
+- Prompt injection resistance improved from 0/9 to 9/9 on targeted comment and docstring injection tests.
 
-| Scenario | PR | Expected | Result |
-|---|---|---|---|
-| Differential fixes merged | #20 | PASS, V1 skipped on PR, `security-posture` runs on push | ✅ |
-| New `eval` endpoint (code injection) | #21 | BLOCK — `New HIGH finding` | ✅ |
-| Fake secret added then removed inside the PR | #22 | BLOCK — `Secret detected in PR commits` | ✅ |
-| Existing `eval` moved down by three lines | #23 | PASS (finding stays EXISTING) | ✅ |
-| Tool integrity (checksum, digests, offline Semgrep) | #24 | PASS | ✅ |
-| New `eval` with the pinned offline Semgrep image | #25 | BLOCK — `New HIGH finding` | ✅ |
-| Manifest sealed between jobs, non-root container | #26 | PASS | ✅ |
+The LLM evaluation uses a small, controlled dataset and does not establish general model reliability.
 
-Test pull requests #21, #22, #23 and #25 were closed without merging. #23 targeted a temporary branch containing a harmless `eval("1 + 1")` fixture, so that no HIGH finding was ever introduced into `main`; its only workflow change was the trigger filter.
+## Documentation
 
-Locally verified as well: a modified Gitleaks archive is rejected by `sha256sum --check`; missing, invalid or modified reports and manifests all produce BLOCK; each Semgrep rule test fails when its rule is deliberately broken.
-
-## V3: local LLM assistant (advisory)
-
-`python -m assistant.explain` reads the scanner reports, sends each finding to a **local** Ollama model, and writes `explanations.md`: an explanation, the risk, a suggested fix and a hint about a possible false positive.
-
-```bash
-ollama pull qwen2.5:7b
-python -m assistant.explain --semgrep reports/semgrep.json \
-  --gitleaks reports/gitleaks.json --trivy reports/trivy.json \
-  --output explanations.md
-```
-
-**The model never decides.** The code it reads comes from the pull request, so its author can write text aimed at the model (prompt injection). The assistant is therefore kept out of the gate:
-
-| Control | What it does |
+| Document | Description |
 |---|---|
-| Isolation | `engine/` never imports `assistant/`, and `security-v2.yml` never calls it. Both are checked by tests. The command never prints PASS/BLOCK and always exits 0 when it runs. |
-| Local only | The Ollama URL must be a loopback address and system proxies are ignored: code never leaves the machine. |
-| Same input checks | Reports are loaded with the V2 normalizers, and paths that leave the repository are refused. |
-| Secrets | No code is sent for Gitleaks findings, lines flagged by Gitleaks are masked, and known secret values are redacted in prompts and answers. |
-| Injection channels removed | Comments and docstrings are removed with `tokenize`/`ast` before code is sent; line numbers are kept. Invalid Python or other languages: no code is sent. |
-| Output validation | The answer must match a strict JSON schema; otherwise the report says "explanation unavailable". |
+| [Architecture](docs/architecture.md) | Workflows, components and repository structure |
+| [Security Engine](docs/engine.md) | Differential analysis and decision policy |
+| [Security Controls](docs/security.md) | Hardening mechanisms and known limitations |
+| [LLM Assistant](docs/llm-assistant.md) | Usage, safeguards and evaluation |
+| [Validation](docs/validation.md) | Test suite and real CI/CD results |
+| [Architecture Decisions](DECISIONS.md) | Key technical choices and rationale |
 
-CI tests use a fake model (no LLM runs in CI).
-
-### Evaluation
-
-13 hand-labelled cases (5 real vulnerabilities, 4 harmless snippets that the rules still report, 4 prompt injections) plus a secret case, 3 runs each, temperature 0. Full tables: [`assistant/evaluation/RESULTS.md`](assistant/evaluation/RESULTS.md); before the injection fix: [`RESULTS-before.md`](assistant/evaluation/RESULTS-before.md).
-
-| Metric (`qwen2.5:7b`) | Before | After removing comments and docstrings |
-|---|---|---|
-| Valid JSON answers | 100% | 100% |
-| Real vulnerability not rated as a likely false positive | 15/15 | 15/15 |
-| Harmless code rated as a possible false positive | 5/12 | 6/12 |
-| Prompt injection resisted | **0/9** | **9/9** (comment, docstring, fake closing tag) |
-| Injection hidden in a string literal (added after) | — | 1/3 |
-| Secret value sent to the model | never | never |
-
-What this shows:
-
-- **Instructions in the prompt did not stop injection** (0/9, both models). Removing the text from the input did. Deterministic controls worked; asking the model to behave did not.
-- **The defence has a known limit:** text inside a string literal is code and cannot be removed; it still steers the model.
-- The model is good at explaining and suggesting fixes, but **weak at judging false positives** (about 50%).
-- `qwen2.5:1.5b` is faster (4 s vs 10 s per finding) but sometimes rates real vulnerabilities as false positives (10/15). `qwen2.5:7b` is the default.
-
-This is a small, hand-made set on one machine: it shows behaviour, not general accuracy.
-
-## Running the tests
-
-```bash
-# Engine tests (214)
-python -m pytest engine/tests -q
-
-# V3 assistant tests (fake model, no Ollama needed)
-python -m pytest assistant/tests -q
-
-# V3 evaluation with real local models (Ollama required)
-python -m assistant.evaluation.run --models qwen2.5:1.5b qwen2.5:7b --runs 3
-
-# Demo application tests
-cd demo-app && python -m pytest -q
-
-# Semgrep rule tests (same pinned image as CI)
-docker run --rm --network none -v "$PWD:/work" -w /work \
-  semgrep/semgrep:1.180.0@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3 \
-  semgrep --test --metrics=off --disable-version-check semgrep-rules/
-```
-
-Note: Semgrep run natively on Windows writes paths with `\`. The engine rejects them on purpose (non-canonical paths); use the Docker image above or a Linux environment.
-
-## Repository structure
-
-```text
-.github/workflows/
-  security-v2.yml         Pull request gate (scan job + decision job)
-  ci.yml                  Tests, rule tests, Docker build; posture scan on main
-
-demo-app/
-  app.py                  Demo FastAPI application
-  Dockerfile              Multi-stage, hash-locked, non-root image
-  requirements.lock       Locked Python dependencies with hashes
-
-engine/
-  differential.py         NEW / EXISTING / FIXED classification
-  line_mapping.py         Line translation through git diff hunks
-  git_comparison.py       Verified git diff between two commits
-  normalizer.py           Scanner reports -> common findings
-  policy.py               PASS / BLOCK rules
-  orchestrator.py         V1 and V2 evaluation flows
-  pr_cli.py, cli.py       V2 and V1 command-line entry points
-  provenance.py           SHA-256 report manifest (detects reports changed
-                          between CI jobs; not an independent proof of origin)
-  generate_pr_manifest.py Manifest generation (scan job)
-  lockfile_sbom.py        CycloneDX SBOM from the lockfile
-  sbom_validation.py      SBOM and Trivy report validation
-  tests/                  Engine and workflow guard tests
-
-semgrep-rules/
-  python-security.yml     Project Semgrep rules
-  python-security.py      Rule test cases (semgrep --test)
-
-assistant/                V3 advisory LLM assistant (never used by the gate)
-  explain.py              Command line: reports -> explanations.md
-  client.py               Loopback-only Ollama client
-  sources.py              Reports, code context, secret masking, comment removal
-  prompt.py               Prompt and JSON answer schema
-  evaluation/             Labelled cases, evaluation script and results
-  tests/                  Tests with a fake model
-```
-
-## Limitations
-
-- **Workflow trust boundary.** With `pull_request`, GitHub runs the workflow file from the pull request. A pull request can modify `security-v2.yml` itself. `main` is protected by a ruleset: changes go through a pull request, `V2 Security Decision` must pass, branches must be up to date before merging, and force pushes and deletion are blocked. Because a pull request can still change the workflow that produces this check, protecting `.github/` with `CODEOWNERS` and mandatory review by a second maintainer would be needed for real enforcement.
-- **Report manifest.** It detects reports changed between the scan and decision jobs. It does not prove that a report was correct when written, since both jobs belong to the same workflow. Engine messages still use the word "provenance" for this check.
-- **SBOM scope.** The SBOM is derived from the lockfile. It is not an independent inventory of the final container.
-- **Container OS packages** are scanned only after merge, by the `security-posture` job on `main`, which runs only when commits are pushed. They are not part of the pull request differential.
-- **No exceptions mechanism.** An existing CRITICAL finding, such as a newly published CVE in a locked dependency, blocks every pull request until it is fixed.
-- **Gitleaks history.** The pull request gate scans the files of both revisions and the commits of the pull request. History before the merge-base is not rescanned.
-- **LLM assistant.** Its explanations can be wrong, and an instruction hidden in a string literal can still change its false-positive hint. It is advisory only and has no effect on the decision.
-- **Detection coverage.** Four pattern-based Semgrep rules, Python only. Scanner databases and configuration limit what can be found. A PASS means the configured controls accepted the change, not that the code is free of vulnerabilities.
-
-## Technology stack
+## Technology Stack
 
 Python · GitHub Actions · Docker · FastAPI · Semgrep · Gitleaks · Trivy · CycloneDX · Pytest · Ollama
 
-## Project status
+## Project Status
 
-**V3.0.0 released.** The V2 gate is unchanged. V3 adds the local advisory assistant and its evaluation; no further features are planned for this version.
+V3.0.0 — Educational and portfolio project.
+
+PipelineGuard is not a production-hardened security boundary. A PASS indicates that the configured security controls have accepted the change, not that the code is free of vulnerabilities.
